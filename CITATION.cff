@@ -1,0 +1,24 @@
+cff-version: "1.2.0"
+message: "If you use this software, please cite it as below."
+type: software
+title: "ERPA: Event-Related Pose Analysis"
+version: "2026.07.01"
+date-released: "2026-07-01"
+
+authors:
+  - family-names: Blackmer
+    given-names: Jason
+    affiliation: "American University, Department of Neuroscience"
+  - family-names: Chavez Lopez
+    given-names: Kevin
+    affiliation: "American University, Department of Neuroscience"
+  - family-names: Katz
+    given-names: Sarah
+    affiliation: "American University, Department of Neuroscience"
+  - family-names: Laubach
+    given-names: Mark
+    orcid: "https://orcid.org/0000-0002-2403-4497"
+    affiliation: "American University, Department of Neuroscience"
+
+repository-code: "https://github.com/LaubachLab/erpa"
+license: "BSD-3-Clause"

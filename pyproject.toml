@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "erpa"
+version = "2026.07.01"
+description = "An analysis package for pose-estimation data from decision-making tasks"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BSD-3-Clause" }
+authors = [{ name = "Jason Blackmer, Kevin Chavez Lopez, Sarah Katz, and Mark Laubach" }]
+keywords = ["neuroscience", "pose estimation", "decision making", "kinematics", "SLEAP"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: BSD Software License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "h5py",
+]
+
+[project.optional-dependencies]
+plot    = ["matplotlib", "seaborn"]
+fda     = ["scikit-fda", "fdasrsf"]
+storage = ["xarray", "netcdf4"]
+extras  = [
+    "matplotlib", "seaborn",
+    "scikit-learn", "shap",
+    "aeon", "pacmap", "fast_hdbscan",
+]
+all = [
+    "erpa[plot]",
+    "erpa[fda]",
+    "erpa[storage]",
+    "erpa[extras]",
+]
+dev = ["pytest"]
+
+[project.urls]
+Repository = "https://github.com/LaubachLab/erpa"
+
+[tool.setuptools.packages.find]
+include = ["erpa*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    "ignore::DeprecationWarning:fdasrsf",
+    "ignore::UserWarning",
+]
