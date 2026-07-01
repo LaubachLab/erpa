@@ -2,6 +2,7 @@
 
 [![License: BSD-3](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
 [![tests](https://github.com/LaubachLab/erpa/actions/workflows/tests.yml/badge.svg)](https://github.com/LaubachLab/erpa/actions/workflows/tests.yml)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21109635.svg)](https://doi.org/10.5281/zenodo.21109635)
 
 How should we represent, quantify, and analyze behavior in an operant decision-making task? ERPA addresses this question with tools for pose-based kinematic analysis, functional data analysis, scalar feature extraction, and analysis pipelines for tabular and time-series classification, dimensionality reduction, and sequential sampling models (e.g., DDMs).
 
