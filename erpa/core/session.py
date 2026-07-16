@@ -1486,7 +1486,7 @@ def locate_ports(trials: List[Dict]) -> Dict[str, np.ndarray]:
         if 0 <= ce < len(cen):
             bins["center"].append(cen[ce])
         if 0 <= ch < len(cen):
-            key = "choice_R" if t["target"] == 1 else "choice_L"
+            key = "choice_R" if t["choice"] == 1 else "choice_L"
             bins[key].append(cen[ch])
     out = {}
     for k, vals in bins.items():
