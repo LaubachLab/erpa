@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 
 from erpa.core.config import RigConfig, DEFAULT_CONFIG
-from erpa.core.session import load_behavior_csv, prepare_figure_trials
+from erpa.core.session import (load_behavior_csv, locate_ports,
+                               prepare_figure_trials)
 from erpa.spatiotemporal.spatial import (
     cm_per_pixel, decision_axis, scalar_feature_matrix, deviation_curves)
 from erpa.spatiotemporal.measures import build_measure_table, measure_columns
@@ -158,3 +159,92 @@ def test_as_meta_frame_coerces():
     assert isinstance(df, pd.DataFrame)
     assert list(df["idx"]) == [0, 1]
     assert as_meta_frame(df) is df          # a DataFrame passes through unchanged
+
+
+# --- port location ----------------------------------------------------------
+
+def _mislabel(trial, target):
+    """Set a trial's target independently of its choice, and recode error.
+
+    The synthetic trial builder walks the path to ``choice``. Overriding
+    ``target`` afterward gives an error trial whose geometry is right and whose
+    metadata disagrees with the entered side.
+    """
+    trial["target"] = target
+    trial["error"] = int(trial["choice"] != target)
+    return trial
+
+
+def _spread_trials(trial_factory, ports, spec, spread_px=30.0):
+    """Build trials whose choice-entry points scatter along the decision axis.
+
+    ``spec`` is a sequence of ``(choice, target)`` pairs. Within each entered
+    side the endpoints are offset by a symmetric ladder, so the median endpoint
+    of that side lands exactly on the true port. Real choice-entry positions
+    scatter this way. The scatter is what lets a contaminated bin pull its
+    median off the port, so a test without it cannot see the bug.
+    """
+    trials = []
+    for side in (0, 1):
+        rows = [(i, c, tg) for i, (c, tg) in enumerate(spec) if c == side]
+        if not rows:
+            continue
+        offs = (np.linspace(-spread_px, spread_px, len(rows)) if len(rows) > 1
+                else np.zeros(1))
+        for (i, c, tg), dy in zip(rows, offs):
+            shifted = {k: (v + np.array([0.0, dy]) if k.startswith("choice")
+                           else v)
+                       for k, v in ports.items()}
+            trials.append(_mislabel(trial_factory(i, c, shifted), target=tg))
+    return sorted(trials, key=lambda t: t["idx"])
+
+
+def test_locate_ports_bins_by_choice(trial_factory, ports3):
+    """Ports follow the entered port, not the correct port.
+
+    Every trial here is a right-target trial and half are errors to the left.
+    Binning by target puts all twelve paths in the right bin, leaves the left
+    bin empty, and drags the right estimate toward the midpoint of the two
+    ports. Binning by choice recovers both ports exactly.
+    """
+    trials = [_mislabel(trial_factory(i, i % 2, ports3), target=1)
+              for i in range(12)]
+    assert sum(t["error"] for t in trials) == 6
+
+    ports = locate_ports(trials)
+
+    assert set(ports) == {"center", "choice_L", "choice_R"}
+    assert ports["choice_L"] == pytest.approx(ports3["choice_L"])
+    assert ports["choice_R"] == pytest.approx(ports3["choice_R"])
+    assert ports["center"] == pytest.approx(ports3["center"])
+
+
+def test_locate_ports_asymmetric_errors_keep_geometry(trial_factory, ports3):
+    """Frequent one-sided errors do not bias the port-derived geometry.
+
+    Twelve right-target trials include four errors. Eight left-target trials
+    include one. That asymmetry is what collapses one center-to-port distance
+    when trials are binned by target. The pixel scale and both distances must
+    survive it.
+    """
+    spec = ([(1, 1)] * 8 + [(0, 1)] * 4          # right target, 4 errors
+            + [(0, 0)] * 7 + [(1, 0)] * 1)       # left target, 1 error
+    trials = _spread_trials(trial_factory, ports3, spec)
+    assert sum(t["error"] for t in trials) == 5
+
+    ports = locate_ports(trials)
+    assert ports["choice_L"] == pytest.approx(ports3["choice_L"], abs=1e-6)
+    assert ports["choice_R"] == pytest.approx(ports3["choice_R"], abs=1e-6)
+
+    assert cm_per_pixel(ports) == pytest.approx(cm_per_pixel(ports3), rel=1e-9)
+    _c, _u, dR, dL = decision_axis(ports)
+    assert abs(dR) == pytest.approx(abs(dL), rel=1e-9)      # 70 px each way
+
+
+def test_locate_ports_omits_a_side_with_no_choices(trial_factory, ports3):
+    """A side the rat never entered yields no port, not a wrong one."""
+    trials = [_mislabel(trial_factory(i, 1, ports3), target=i % 2)
+              for i in range(6)]
+    ports = locate_ports(trials)
+    assert "choice_L" not in ports
+    assert ports["choice_R"] == pytest.approx(ports3["choice_R"])
