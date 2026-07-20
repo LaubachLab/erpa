@@ -10,9 +10,7 @@ velocity extraction, and trajectory resampling.
 # BEHAVIORAL CSV FORMAT
 # =============================================================================
 # ERPA loads behavioral data from a CSV file with one row per trial.
-# The file must contain the columns listed below. Column names are those used
-# in the raw MedPC-to-CSV export from the Laubach Lab. ERPA renames them on
-# load using COLUMN_RENAMES.
+# Common source-column names are normalized on load with COLUMN_RENAMES.
 #
 # Required columns (raw name -> ERPA name):
 #   latency    -> rt          Reaction time: center exit to choice entry (s)
@@ -36,14 +34,13 @@ velocity extraction, and trajectory resampling.
 #   absolute_trial  Original row index before any filtering
 #   error           1 if target != choice, 0 if target == choice
 #
-# Columns that may be present but are ignored:
-#   filters, sex, and any other lab-specific bookkeeping columns
+# Additional columns may be present and are ignored unless retained below.
 # =============================================================================
 
 import os
 import subprocess
 import warnings
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import h5py
 import numpy as np
@@ -52,6 +49,20 @@ from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
 
 from erpa.core.config import DEFAULT_CONFIG, RigConfig
+
+
+Trial = Dict[str, Any]
+NodeData = Dict[str, np.ndarray]
+SessionSeries = Dict[str, Any]
+Ports = Dict[str, np.ndarray]
+EpochWindows = Mapping[str, Tuple[int, int]]
+
+
+class _UnsetType:
+    """Sentinel type for arguments that defer to ``RigConfig`` values.
+    """
+
+    __slots__ = ()
 
 
 # ==============================================================================
@@ -70,8 +81,7 @@ REDUCED_RESOLUTION = DEFAULT_CONFIG.reduced_resolution
 # Velocity calculation parameters
 DEFAULT_SMOOTHING_WINDOW = DEFAULT_CONFIG.smoothing_window
 DEFAULT_POLYNOMIAL_ORDER = DEFAULT_CONFIG.poly_order
-PIXEL_TO_CM_CONVERSION = 0.099930755788  # fallback velocity scale; distances now
-                                         # derive cm from ports, see config note
+PIXEL_TO_CM_CONVERSION = 0.099930755788  # used when port scaling is unavailable
 
 # Peak detection parameters
 MIN_VELOCITY_THRESHOLD = DEFAULT_CONFIG.min_velocity_threshold
@@ -85,18 +95,18 @@ POSE_OUTLIER_THRESHOLD = DEFAULT_CONFIG.pose_outlier_threshold
 ROBUST_ZSCORE_THRESHOLD = DEFAULT_CONFIG.robust_zscore_threshold
 
 # Behavioral column handling
-_UNSET = object()
+_UNSET = _UnsetType()
 
-# The trial type variable is used for behavioral experiments with a mixture of
-# single offers and dual offers as used in studies by White (PMID: 38724267)
-# and Palmer (PMID: 39327005, PMID: 42270405).
+# Normalize common column names used by behavioral exports.
+# This code block addresses column name inconsistencies in
+# some files in the Laubach Lab.
 COLUMN_RENAMES = {
     "sample": "sampling",
     "latency": "rt",
     "RT": "rt",
     "presented": "target",
     "response": "choice",
-    "trialtype": "trial_type",  # two variants used in files from the Laubach Lab
+    "trialtype": "trial_type",
     "itis": "iti",
 }
 
@@ -115,7 +125,7 @@ def _clean_pose_outliers(
 
     Parameters
     ----------
-    positions : numpy.ndarray
+    positions : np.ndarray
         Node position array with shape ``(n_frames, 2, 1)``.
     threshold : float, optional
         Maximum accepted frame-to-frame displacement in pixels.
@@ -123,10 +133,13 @@ def _clean_pose_outliers(
     Returns
     -------
     numpy.ndarray
-        Position array with flagged samples replaced by interpolated values."""
+        Position array with flagged samples replaced by interpolated values.
+    """
     Y = positions.copy()
 
-    def is_far(pos1, pos2, thresh):
+    def is_far(
+        pos1: np.ndarray, pos2: np.ndarray, thresh: float
+    ) -> np.ndarray:
         """Return whether paired positions differ by more than a threshold."""
         return np.linalg.norm(np.subtract(pos1, pos2), axis=1) > thresh
 
@@ -169,10 +182,10 @@ def _compute_heading_from_pair(
 
     Parameters
     ----------
-    left : numpy.ndarray
+    left : np.ndarray
         Left node position array with shape ``(n_frames, 2, 1)`` or
         ``(n_frames, 2)``.
-    right : numpy.ndarray
+    right : np.ndarray
         Right node position array with shape ``(n_frames, 2, 1)`` or
         ``(n_frames, 2)``.
     dist : float, optional
@@ -217,7 +230,8 @@ def _fill_missing_values(Y: np.ndarray, kind: str = "linear") -> np.ndarray:
     Returns
     -------
     numpy.ndarray
-        Array with the same shape as ``Y`` and missing values filled where possible."""
+        Array with the same shape as ``Y`` and missing values filled where possible.
+    """
     initial_shape = Y.shape
     Y = Y.reshape((initial_shape[0], -1))
 
@@ -254,12 +268,12 @@ def analyze_epoch_peaks(
 ) -> pd.DataFrame:
     """Compute peak measures from event-aligned velocity profiles.
 
-    For each trial, the function finds the maximum velocity in the full window and
-    separate maxima before and after the alignment event.
+    Finds the maximum velocity in the full window and separate maxima before
+    and after the alignment event for each trial.
 
     Parameters
     ----------
-    epoch_velocity : numpy.ndarray
+    epoch_velocity : np.ndarray
         Event-aligned velocity array with shape ``(n_trials, window_size)``.
     window_before : int
         Number of frames before the alignment event. This sets the event index in
@@ -321,17 +335,17 @@ def analyze_epoch_peaks(
     return pd.DataFrame(results)
 
 def average_node_velocities(
-    velocities: List[np.ndarray],
+    velocities: Sequence[np.ndarray],
     threshold: float = 10
 ) -> np.ndarray:
     """Average velocity estimates across tracked nodes.
 
-    The function compares node velocities at each frame and excludes a value when it
-    is separated from the other values by at least ``threshold``.
+    Compares node velocities frame by frame and excludes a value when it differs
+    from the other estimates by at least ``threshold``.
 
     Parameters
     ----------
-    velocities : list of numpy.ndarray
+    velocities : sequence of np.ndarray
         Velocity arrays from tracked nodes.
     threshold : float, optional
         Difference threshold used to identify a disagreeing node velocity.
@@ -339,7 +353,8 @@ def average_node_velocities(
     Returns
     -------
     numpy.ndarray
-        Averaged velocity array. Missing values are ignored when possible."""
+        Averaged velocity array. Missing values are ignored when possible.
+    """
     velocities = [np.atleast_1d(v) for v in velocities]
     max_len = max(len(v) for v in velocities)
 
@@ -377,13 +392,13 @@ def average_node_velocities(
 
 def build_trials(
     df: pd.DataFrame,
-    series: Dict[str, np.ndarray],
+    series: SessionSeries,
     frame0_time: float,
     pre_s: float = 0.4,
     post_s: float = 0.8,
     anchor: str = "center_entry",
     t0_anchor: Optional[float] = None,
-) -> List[Dict]:
+) -> List[Trial]:
     """Build event-aligned trial dictionaries from session series.
 
     Each trial window starts before center entry and ends after choice entry. The
@@ -424,7 +439,8 @@ def build_trials(
     Notes
     -----
     Segment-based analyses should use windows that contain both center exit and
-    choice entry. Event-centered windows can clip one end of the movement segment."""
+    choice entry. Event-centered windows can clip one end of the movement segment.
+    """
     valid_anchors = ("center_entry", "center_exit", "choice_entry", "reward_entry")
     if anchor not in valid_anchors:
         raise KeyError(f"anchor '{anchor}' invalid. Choose from {valid_anchors}.")
@@ -513,19 +529,17 @@ def build_trials(
             "sampling": float(row["sampling"]),
             "session": str(row["session"]),
         }
-        # trial_type rides along only when the CSV has it, the value task.
-        # Coded 0 for single offer, 1 for dual offer. Detection sessions omit it.
-        # Guard the int cast against a blank value on an aborted trial.
+        # Retain trial type when present and non-missing.
         if "trial_type" in row and pd.notna(row["trial_type"]):
             trials_td["trial_type"] = int(row["trial_type"])
         trials.append(trials_td)
     return trials
 
 def calculate_angular_measures(
-    posterior_nodes: List[np.ndarray],
+    posterior_nodes: Sequence[np.ndarray],
     heading_node: Optional[np.ndarray] = None,
     fps: int = 25
-) -> np.ndarray:
+) -> Tuple[np.ndarray, np.ndarray]:
 
     """Compute head angle and angular velocity.
 
@@ -535,11 +549,11 @@ def calculate_angular_measures(
 
     Parameters
     ----------
-    posterior_nodes : list of numpy.ndarray
+    posterior_nodes : sequence of np.ndarray
         Position arrays used to compute the posterior centroid. Each array must have
         shape ``(n_frames, 2, 1)`` or ``(n_frames, 2)``. When ``heading_node`` is
         ``None``, this must contain the ordered pair ``[left_node, right_node]``.
-    heading_node : numpy.ndarray or None, optional
+    heading_node : np.ndarray or None, optional
         Position array used as the head of the heading vector. If ``None``, the
         heading point is computed from ``posterior_nodes``.
     fps : int, optional
@@ -550,15 +564,16 @@ def calculate_angular_measures(
     head_angle_wrapped : numpy.ndarray
         Head angle in radians, wrapped to the interval ``[-pi, pi]``. Shape is
         ``(n_frames,)``.
-    angular_velocity : numpy.ndarray
+    angular_velocity : np.ndarray
         Angular velocity in radians per second. Shape is usually ``(n_frames, 1)``.
 
     Warns
     -----
     UserWarning
         Warns when ``heading_node`` is ``None`` because the left-right node order
-        determines the forward direction."""
-    def wrap_to_pi(angles):
+        determines the forward direction.
+    """
+    def wrap_to_pi(angles: np.ndarray) -> np.ndarray:
         """Wrap an angle series after removing 2-pi discontinuities."""
         angles = angles.copy()
         angles = np.unwrap(angles).reshape(-1,1)
@@ -569,7 +584,11 @@ def calculate_angular_measures(
     # Heading vector: posterior landmark to ear midpoint
     posterior_centroid = (sum(posterior_nodes) / len(posterior_nodes)).reshape(-1, 2)
     if heading_node is None:
-        warnings.warn(f'In the absence of a heading node, posterior_nodes must be a list containing two symmetrical node arrays, ordered [left_node, right_node]')
+        warnings.warn(
+            "When heading_node is None, posterior_nodes must contain two "
+            "symmetric node arrays ordered as (left_node, right_node).",
+            stacklevel=2,
+        )
         heading_node = _compute_heading_from_pair(posterior_nodes[0], posterior_nodes[1])
     heading = heading_node - posterior_centroid # shape (n_frames, 2)
 
@@ -592,12 +611,12 @@ def calculate_velocity(
 ) -> np.ndarray:
     """Compute velocity magnitude from position samples.
 
-    The function applies a Savitzky-Golay derivative separately to x and y and then
-    returns the Euclidean norm of the derivative.
+    Applies a Savitzky-Golay derivative to each spatial coordinate and returns
+    the Euclidean norm of the derivative.
 
     Parameters
     ----------
-    positions : numpy.ndarray
+    positions : np.ndarray
         Position array with shape ``(n_frames, 2, n_tracks)`` or ``(n_frames, 2)``.
         If a track axis is present, only the first track is used.
     window : int, optional
@@ -649,8 +668,7 @@ def compute_event_frames(
 ) -> np.ndarray:
     """Compute video frame indices for behavioral events.
 
-    The function converts behavioral task times to video frame indices for one event
-    type.
+    Converts behavioral timestamps to video frame indices for one event type.
 
     Parameters
     ----------
@@ -707,9 +725,9 @@ def compute_mean_squared_displacement(
 
     Parameters
     ----------
-    trials : numpy.ndarray
+    trials : np.ndarray
         Trial trajectories with shape ``(n_trials, n_frames, 2)``.
-    reference : numpy.ndarray
+    reference : np.ndarray
         Reference trajectory with shape ``(n_frames, 2)``.
 
     Returns
@@ -725,7 +743,7 @@ def compute_robust_zscore(data: np.ndarray) -> np.ndarray:
 
     Parameters
     ----------
-    data : numpy.ndarray
+    data : np.ndarray
         Values to transform.
 
     Returns
@@ -743,7 +761,7 @@ def compute_robust_zscore(data: np.ndarray) -> np.ndarray:
     return 0.6745 * (data - median) / mad
 
 def compute_session_series(
-    node_data: Dict[str, np.ndarray],
+    node_data: NodeData,
     framerate: int = DEFAULT_FRAMERATE,
     smoothing_window: int = DEFAULT_SMOOTHING_WINDOW,
     poly_order: int = DEFAULT_POLYNOMIAL_ORDER,
@@ -751,11 +769,11 @@ def compute_session_series(
     heading_node: Optional[str] = "MidCann",
     centroid_nodes: Optional[Sequence[str]] = None,
     pixel_to_cm: Optional[float] = None,
-) -> Dict[str, np.ndarray]:
+) -> SessionSeries:
     """Compute per-frame pose and kinematic series.
 
-    The function computes centroid position, head angle, linear velocity, and
-    angular velocity for the full session.
+    Computes centroid position, head angle, linear velocity, and angular
+    velocity for the full session.
 
     Parameters
     ----------
@@ -839,9 +857,8 @@ def downsample_videos(
 ) -> None:
     """Downsample MP4 videos with FFmpeg.
 
-    The function processes MP4 files in ``input_folder`` and writes resized copies
-    to ``output_folder``. Files whose names already contain ``output_suffix`` are
-    skipped.
+    Resizes MP4 files from ``input_folder`` and writes the results to
+    ``output_folder``. Files that already contain ``output_suffix`` are skipped.
 
     Parameters
     ----------
@@ -880,7 +897,7 @@ def downsample_videos(
 
 def estimate_frame0_time(
     df: pd.DataFrame,
-    series: Dict[str, np.ndarray],
+    series: SessionSeries,
     search: Optional[Tuple[float, float, float]] = None,
     coarse_step: float = 0.5,
     fine_step: float = 0.02,
@@ -888,10 +905,10 @@ def estimate_frame0_time(
 ) -> float:
     """Estimate the video time of the first behavioral trial.
 
-    The function scans candidate video offsets and scores each one by the velocity
-    contrast between the center-port hold period and the movement period after
-    center exit. This function is experimental. Users should measure `frame0_time`
-    from the actual video for serious analysis.
+    Scores candidate video offsets using the velocity contrast between the
+    center-port hold period and the movement period after center exit. The estimate
+    is intended for alignment checks; determine ``frame0_time`` from the video for
+    final analyses whenever possible.
 
     Parameters
     ----------
@@ -916,8 +933,9 @@ def estimate_frame0_time(
 
     Notes
     -----
-    This function estimates the video offset only. It does not estimate
-    ``trial_offset``. Verify the estimate against the video before final analysis."""
+    The estimate covers the video offset only and does not include
+    ``trial_offset``. Verify the result against the source video.
+    """
     fps = series["framerate"]
     sv = np.asarray(series["lin_vel"], float)
     n = sv.shape[0]
@@ -932,14 +950,14 @@ def estimate_frame0_time(
     t_exit = (df["time"] + df["sampling"] - t0).to_numpy(float)
     t_choice = (df["time"] + df["sampling"] + df["rt"] - t0).to_numpy(float)
 
-    def window_mean(a, b):
+    def window_mean(a: np.ndarray, b: np.ndarray) -> np.ndarray:
         # mean of sv over [a, b) per trial, O(1) via the cumulative sum
         good = b > a
         out = np.full(a.shape, np.nan)
         out[good] = (csum[b[good]] - csum[a[good]]) / (b[good] - a[good])
         return out
 
-    def score(f0):
+    def score(f0: float) -> float:
         fe = np.floor((t_entry + f0) * fps).astype(int)
         fx = np.floor((t_exit + f0) * fps).astype(int)
         fc = np.floor((t_choice + f0) * fps).astype(int)
@@ -951,7 +969,7 @@ def estimate_frame0_time(
         move = window_mean(fx[ok], fm[ok])
         return np.nanmean(move) - np.nanmean(hold)
 
-    def scan(grid):
+    def scan(grid: np.ndarray) -> float:
         best_f0, best = grid[0], -np.inf
         for f0 in grid:
             s = score(f0)
@@ -977,12 +995,12 @@ def extract_epoch_velocities(
     smoothing_window: int = DEFAULT_SMOOTHING_WINDOW,
     poly_order: int = DEFAULT_POLYNOMIAL_ORDER,
     framerate: int = DEFAULT_FRAMERATE,
-    epochs: Optional[Dict[str, Tuple[int, int]]] = None
+    epochs: Optional[EpochWindows] = None
 ) -> Tuple[Dict[str, np.ndarray], pd.DataFrame]:
     """Extract velocity profiles for multiple task epochs.
 
-    The function loads pose and behavioral data, computes full-session velocity from
-    the first tracked node, and extracts event-aligned velocity windows.
+    Loads pose and behavioral data, computes full-session velocity from the
+    first tracked node, and extracts event-aligned windows.
 
     Parameters
     ----------
@@ -1023,7 +1041,7 @@ def extract_epoch_velocities(
     if epochs is None:
         epochs = {
             'center_entry': (38, 25),   # 1.5s before (approach), 1s after (sampling)
-            'center_exit': (13, 38),    # 0.5s before (end of sampling), 1.5s after (choice movement)
+            'center_exit': (13, 38),    # 0.5 s before, 1.5 s after
             'choice_entry': (25, 25),   # 1s before (choice approach), 1s after (exit to reward)
             'reward_entry': (38, 13),   # 1.5s before (travel from choice), 0.5s after (at reward)
         }
@@ -1062,12 +1080,12 @@ def find_peak_velocity(
 ) -> Tuple[Optional[float], Optional[int]]:
     """Find the first local velocity maximum after a start frame.
 
-    The function searches forward from ``search_start`` and returns the first local
-    maximum above ``min_velocity`` within ``max_search_frames``.
+    Searches forward from ``search_start`` for the first local maximum above
+    ``min_velocity`` within ``max_search_frames``.
 
     Parameters
     ----------
-    velocity : numpy.ndarray
+    velocity : np.ndarray
         Velocity time series for one trial.
     search_start : int, optional
         Frame index where the search begins. Passing the center-exit frame excludes
@@ -1105,13 +1123,13 @@ def find_velocity_minimum(
 ) -> int:
     """Find a local velocity minimum near the start of a trial.
 
-    The function searches the first ``max_search_frames`` for local minima below
-    ``min_velocity``. If ``peak_index`` is given, the last detected minimum before
-    that peak is returned when available.
+    Searches the first ``max_search_frames`` for local minima below the selected
+    floor. When ``peak_index`` is provided, the last qualifying minimum before the
+    peak is preferred.
 
     Parameters
     ----------
-    velocity : numpy.ndarray
+    velocity : np.ndarray
         Velocity time series for one trial.
     peak_index : int or None, optional
         Peak frame index used to select a preceding minimum.
@@ -1172,9 +1190,9 @@ def get_event_aligned_velocity(
 
     Parameters
     ----------
-    session_velocity : numpy.ndarray
+    session_velocity : np.ndarray
         Full-session velocity array.
-    event_frames : numpy.ndarray
+    event_frames : np.ndarray
         Video frame indices for alignment events.
     window_before : int, optional
         Number of frames before the event frame.
@@ -1219,13 +1237,13 @@ def load_behavior_csv(
 ) -> pd.DataFrame:
     """Load and clean a behavioral CSV file.
 
-    The function applies ERPA task column names, computes the error column,
-    and filters invalid trials.
+    Normalizes task column names, computes the error indicator, and filters
+    invalid trials.
 
     Parameters
     ----------
     behavioral_csv : str
-        Path to the lab-processed behavioral CSV file.
+        Path to the behavioral CSV file.
     trial_offset : int, optional
         Number of leading trials to drop before validity filtering.
     valid_pct : float, optional
@@ -1243,25 +1261,23 @@ def load_behavior_csv(
     Notes
     -----
     ``error`` is computed as ``target != choice``: 1 for an error, 0 for a
-    correct trial. This definition is valid for both single-offer and dual-offer
-    trial types. Alignment uses timestamps from the kept trials and the original
-    first trial time stored in ``df.attrs["t0_anchor"]``."""
+    correct trial. This definition applies to both single-offer and dual-offer
+    trials. Alignment uses timestamps from retained trials and the original first
+    trial time stored in ``df.attrs["t0_anchor"]``.
+    """
     df = pd.read_csv(behavioral_csv, index_col=0)
     df = df.rename(columns=COLUMN_RENAMES)
     # Drop duplicate column names that arise when a file contains both the
     # original name (e.g. latency) and the target name (e.g. rt). Keep the
     # first occurrence, which is the renamed canonical column.
     df = df.loc[:, ~df.columns.duplicated(keep="first")]
-    # Record the original trial number from the raw file before any slicing or
-    # filtering. This is kept for record only. It traces a kept trial back to the
-    # raw video and MedPC log, and supports post hoc sequential-effect analysis.
-    # It does not drive alignment. idx stays the position of the kept trial.
+    # Retain the source-row index before slicing or filtering. This value supports
+    # traceability and sequential analyses but does not affect alignment.
     df["absolute_trial"] = np.asarray(df.index)
     df = df.iloc[trial_offset:].reset_index(drop=True)
 
-    # Pin the alignment anchor to the first trial BEFORE any validity filtering.
-    # frame0_time is calibrated to this trial, so the anchor must not move when
-    # filtering drops trials. build_trials reads it from df.attrs.
+    # Store the first trial time before validity filtering. ``frame0_time`` is
+    # calibrated to this trial, so filtering must not shift the alignment anchor.
     t0_anchor = float(df["time"].iloc[0]) if len(df) else None
 
     # Count before any validity drop, so the dropped-trial summary is complete.
@@ -1288,7 +1304,7 @@ def load_behavior_csv(
     df.attrs["t0_anchor"] = t0_anchor
     n_drop = n0 - len(df)
     if n_drop:
-        warnings.warn(
+        print(
             f"load_behavior_csv dropped {n_drop} of {n0} trials with a missing "
             f"outcome, negative sampling, or sampling/rt above the "
             f"{valid_pct:.0f}th percentile."
@@ -1308,18 +1324,17 @@ def load_session(
     frame0_time: Optional[float] = None,
     trial_offset: int = 0,
     config: Optional[RigConfig] = None,
-    pre_s: float = _UNSET,
-    post_s: float = _UNSET,
-    posterior_nodes: Sequence[str] = _UNSET,
-    heading_node: Optional[str] = _UNSET,
-    centroid_nodes: Optional[Sequence[str]] = _UNSET,
-) -> Tuple[List[Dict], pd.DataFrame, Dict[str, np.ndarray], Dict[str, np.ndarray], float]:
+    pre_s: Union[float, _UnsetType] = _UNSET,
+    post_s: Union[float, _UnsetType] = _UNSET,
+    posterior_nodes: Union[Sequence[str], _UnsetType] = _UNSET,
+    heading_node: Union[str, None, _UnsetType] = _UNSET,
+    centroid_nodes: Union[Sequence[str], None, _UnsetType] = _UNSET,
+) -> Tuple[List[Trial], pd.DataFrame, SessionSeries, Ports, float]:
     """Load pose and behavior data for one ERPA session.
 
-    The function loads SLEAP and behavioral files, computes session-level pose and
-    kinematic series, builds trial dictionaries, estimates port locations, and
-    recomputes velocity with a port-derived pixels-to-centimeters scale when both
-    choice ports are found.
+    Loads SLEAP and behavioral data, computes session-level pose and kinematic
+    series, builds trial dictionaries, estimates port locations, and recalculates
+    velocity with a port-derived scale when both choice ports are available.
 
     Parameters
     ----------
@@ -1394,16 +1409,14 @@ def load_session(
                      heading_node=heading_node,
                      centroid_nodes=centroid_nodes)
 
-    # Pass one. A provisional series to locate the ports. Port location uses the
-    # centroid, which is in pixels and independent of the velocity scale, so the
-    # provisional scale does not affect the ports or trial alignment.
+    # Build a provisional series to estimate port locations. Centroid positions
+    # are in pixels, so the provisional velocity scale does not affect alignment.
     series = compute_session_series(node_data, **series_kw)
     trials = build_trials(df, series, frame0_time, pre_s=pre_s, post_s=post_s)
     ports = locate_ports(trials)
 
-    # Pass two. Derive the true pixels-to-cm scale from the ports and recompute
-    # velocity in cm/s, then rebuild trials so vel_choice and the FDA amplitudes
-    # carry the port-derived scale rather than the PIXEL_TO_CM_CONVERSION constant.
+    # When both choice ports are available, derive a session-specific spatial
+    # scale and rebuild the velocity-dependent trial fields.
     from erpa.spatiotemporal.spatial import cm_per_pixel
     if {"choice_L", "choice_R"} <= set(ports):
         pix_cm = cm_per_pixel(ports, port_spacing_cm=cfg.port_spacing_cm)
@@ -1415,13 +1428,14 @@ def load_session(
 
     return trials, df, series, ports, frame0_time
 
-def load_sleap_data(sleap_file: str,
-                    outlier_threshold: float = POSE_OUTLIER_THRESHOLD
-                    ) -> Dict[str, np.ndarray]:
+def load_sleap_data(
+    sleap_file: str,
+    outlier_threshold: float = POSE_OUTLIER_THRESHOLD,
+) -> NodeData:
     """Load pose data from a SLEAP analysis HDF5 file.
 
-    The function reads tracked node locations, fills missing values by
-    interpolation, and replaces large frame-to-frame jumps with interpolated values.
+    Reads tracked node locations, fills missing values, and replaces large
+    frame-to-frame jumps with interpolated values.
 
     Parameters
     ----------
@@ -1461,7 +1475,7 @@ def load_sleap_data(sleap_file: str,
 
     return node_data
 
-def locate_ports(trials: List[Dict]) -> Dict[str, np.ndarray]:
+def locate_ports(trials: Sequence[Trial]) -> Ports:
     """Estimate port locations from trial event positions.
 
     The center port is estimated from centroid positions at center entry. The left
@@ -1494,7 +1508,7 @@ def locate_ports(trials: List[Dict]) -> Dict[str, np.ndarray]:
             out[k] = np.nanmedian(np.array(vals), axis=0)
     return out
 
-def ports_array(ports: Dict[str, np.ndarray]) -> np.ndarray:
+def ports_array(ports: Mapping[str, np.ndarray]) -> np.ndarray:
     """Stack port coordinates into a fixed-order array.
 
     Parameters
@@ -1510,12 +1524,14 @@ def ports_array(ports: Dict[str, np.ndarray]) -> np.ndarray:
     order = [k for k in ("center", "choice_L", "choice_R") if k in ports]
     return np.array([ports[k] for k in order])
 
-def prepare_figure_trials(trials: List[Dict], velocity_key: str = "lin_vel"
-                     ) -> List[Dict]:
+def prepare_figure_trials(
+    trials: Sequence[Trial],
+    velocity_key: str = "lin_vel",
+) -> List[Trial]:
     """Add fields used by trajectory and velocity plotting functions.
 
-    The function returns shallow copies of trial dictionaries with plotting aliases
-    for trajectory, velocity, error status, and velocity extrema.
+    Returns shallow copies of trial dictionaries with plotting fields for the
+    trajectory, velocity, outcome, and velocity extrema.
 
     Parameters
     ----------
@@ -1555,7 +1571,7 @@ def resample_trajectory(
 
     Parameters
     ----------
-    trajectory : numpy.ndarray
+    trajectory : np.ndarray
         Position array with shape ``(n_frames, 2)``.
     original_length : int
         Number of valid samples from ``trajectory`` to use.
@@ -1581,7 +1597,7 @@ def resample_velocity(
 
     Parameters
     ----------
-    velocity : numpy.ndarray
+    velocity : np.ndarray
         Velocity array.
     original_length : int
         Number of valid samples from ``velocity`` to use.
@@ -1600,13 +1616,13 @@ def resample_velocity(
     return interp_func(x_new)
 
 def reshape_trajectories(
-    trials: List[Dict],
+    trials: Sequence[Trial],
     output_path: Optional[str] = None
 ) -> np.ndarray:
     """Pad trial trajectories to a common length.
 
-    The function converts variable-length trial trajectories to one three-dimensional
-    array with NaN padding.
+    Converts variable-length trial trajectories to a three-dimensional array
+    with NaN padding.
 
     Parameters
     ----------
@@ -1647,12 +1663,12 @@ def synchronize_timescales(
 ) -> Tuple[np.ndarray, float]:
     """Convert behavioral times to video frame indices.
 
-    The function aligns behavioral timestamps to video frames using either the
-    nominal frame rate or a linear drift coefficient.
+    Converts behavioral timestamps to video frames using either the nominal
+    frame rate or a linear drift coefficient.
 
     Parameters
     ----------
-    behavioral_times : numpy.ndarray
+    behavioral_times : np.ndarray
         Behavioral event times in seconds.
     frame0_time : float
         Video time, in seconds, corresponding to the first behavioral timestamp.
