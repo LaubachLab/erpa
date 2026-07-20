@@ -1,46 +1,127 @@
 """Correlation clustermap for ERPA scalar measure tables."""
 
-import numpy as np
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TypedDict, Union
+
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import scipy.cluster.hierarchy as sch
+import seaborn as sns
+from matplotlib.colors import Colormap, LinearSegmentedColormap
 from scipy.spatial.distance import squareform
 from scipy.stats import spearmanr
 
 
-def corr_clustermap(table, measures=None, prune=True, method="average",
-                    n_groups=None, cmap="coolwarm", figsize=None):
+# Diverging Okabe-Ito map: blue for negative correlations, vermillion for
+# positive correlations, and white at zero.
+OKABE_ITO_DIVERGING: LinearSegmentedColormap = LinearSegmentedColormap.from_list(
+    "OkabeIto", ["#0072B2", "#FFFFFF", "#D55E00"]
+)
+
+# Columns that describe trials or sessions rather than scalar measures.
+LABEL_COLUMNS = {
+    "participant_id",
+    "name",
+    "date",
+    "session",
+    "sess",
+    "session_file",
+    "idx",
+    "absolute_trial",
+    "target",
+    "choice",
+    "error",
+    "hit",
+    "cue",
+    "cue_level",
+    "rt",
+    "RT",
+    "trial_type",
+    "treatment",
+}
+
+# When both forms are present, retain the normalized measure by default.
+REDUNDANT_PAIRS: Tuple[Tuple[str, str], ...] = (
+    ("dev_unchosen_cm", "dev_unchosen_norm"),
+    ("path_len_cm", "path_len_norm"),
+)
+
+
+class ClustermapInfo(TypedDict):
+    """Metadata returned by :func:`corr_clustermap`."""
+
+    order: List[str]
+    linkage: np.ndarray
+    measures: List[str]
+    groups: Optional[Dict[str, int]]
+
+
+def _resolve_cmap(cmap: Union[str, Colormap]) -> Colormap:
+    """Resolve a colormap name or return an existing colormap.
+
+    Parameters
+    ----------
+    cmap : str or matplotlib.colors.Colormap
+        Colormap name or object. ``"okabe_ito"`` selects the package
+        diverging map. ``"vlag"`` selects seaborn's diverging map. Other
+        strings are passed to Matplotlib.
+
+    Returns
+    -------
+    matplotlib.colors.Colormap
+        Resolved colormap.
+    """
+    if isinstance(cmap, Colormap):
+        return cmap
+    if cmap in {"okabe_ito", "OkabeIto"}:
+        return OKABE_ITO_DIVERGING
+    if cmap == "vlag":
+        return sns.color_palette("vlag", as_cmap=True)
+    return plt.get_cmap(cmap)
+
+
+def corr_clustermap(
+    table: pd.DataFrame,
+    measures: Optional[Sequence[str]] = None,
+    prune: bool = True,
+    method: str = "average",
+    n_groups: Optional[int] = None,
+    cmap: Union[str, Colormap] = "okabe_ito",
+    figsize: Optional[Tuple[float, float]] = None,
+) -> Tuple[plt.Figure, ClustermapInfo]:
     """Plot a Spearman correlation clustermap of scalar measures.
 
-    Measures are reordered by hierarchical clustering on ``1 - |corr|``.
-    Correlations with ``p > 0.05`` are masked to zero in the display.
+    Measures are ordered by hierarchical clustering of ``1 - |r|``.
+    Correlations with ``p > 0.05`` are displayed as zero.
 
     Parameters
     ----------
     table : pandas.DataFrame
-        Output of ``build_measure_table``.
-    measures : list of str or None, optional
-        Columns to include. If ``None``, all non-label columns are used.
+        Scalar measure table, typically returned by ``build_measure_table``.
+    measures : sequence of str or None, optional
+        Columns to include. If ``None``, all columns not listed in
+        ``LABEL_COLUMNS`` are considered.
     prune : bool, optional
-        If ``True``, drop the centimeter twin of a measure when its normalized
-        twin is present. Pass ``measures`` to use an explicit set instead.
+        Remove the centimeter form of a measure when its normalized form is
+        also present. This option is ignored only when the pair is incomplete.
     method : str, optional
         Linkage method passed to ``scipy.cluster.hierarchy.linkage``.
     n_groups : int or None, optional
-        If set, cut the tree into ``n_groups`` clusters, outline the diagonal
-        blocks, and return a group label per measure in ``info["groups"]``.
-    cmap : str, optional
-        Colormap for the heatmap.
+        Number of clusters used to outline diagonal blocks. If ``None``, no
+        group boundaries are drawn.
+    cmap : str or matplotlib.colors.Colormap, optional
+        Heatmap colormap. The default is the Okabe-Ito diverging map.
     figsize : tuple of float or None, optional
-        Figure size in inches. If ``None``, size is derived from the number of
+        Figure size in inches. If ``None``, the size is based on the number of
         measures.
 
     Returns
     -------
     fig : matplotlib.figure.Figure
         Figure containing the dendrogram and heatmap.
-    info : dict
-        Dictionary with keys ``"order"``, ``"linkage"``, ``"measures"``, and
-        ``"groups"``.
+    info : ClustermapInfo
+        Ordered measure names, linkage matrix, included measures, and optional
+        cluster assignments.
 
     Raises
     ------
@@ -50,106 +131,135 @@ def corr_clustermap(table, measures=None, prune=True, method="average",
     Notes
     -----
     ``peak_ang_vel`` is converted to absolute values before correlation because
-    it is a signed measure whose sign depends on turn direction.
-    The label set and redundant pairs are tuned for the Laubach Lab task design.
+    its sign depends on turn direction.
     """
-    # these values are specific to those used by the Laubach Lab
-    # revise them as needed for your experimental design
-    _LABELS = {"participant_id", "idx", "absolute_trial", "target", "choice", "hit",
-               "cue_level", "RT", "treatment", "session_file"}
-    _REDUNDANT_PAIRS = [("dev_unchosen_cm", "dev_unchosen_norm"),
-                        ("path_len_cm", "path_len_norm")]
+    data = table.copy()
+    if "peak_ang_vel" in data.columns:
+        data["peak_ang_vel"] = np.abs(data["peak_ang_vel"])
 
-    # angular velocity should be set to absolute values, as this is a signed measure
-    # i.e., trials with left and right movements have negative and positive signs
-    table = table.copy()
-    if "peak_ang_vel" in table.columns:
-        table["peak_ang_vel"] = np.abs(table["peak_ang_vel"])
+    if measures is None:
+        columns = [column for column in data.columns if column not in LABEL_COLUMNS]
+    else:
+        columns = list(measures)
 
-    cols = list(measures) if measures is not None else \
-        [c for c in table.columns if c not in _LABELS]
     if prune:
-        for cm, norm in _REDUNDANT_PAIRS:
-            if cm in cols and norm in cols:
-                cols.remove(cm)
+        for centimeter, normalized in REDUNDANT_PAIRS:
+            if centimeter in columns and normalized in columns:
+                columns.remove(centimeter)
 
-    M = table[cols].dropna()
-    cols = [c for c in cols if M[c].std() > 0]
-    M = M[cols]
-    n = len(cols)
-    if n < 3:
-        raise ValueError("need at least three usable measures for a clustermap")
+    matrix = data[columns].dropna()
+    columns = [column for column in columns if matrix[column].std() > 0]
+    matrix = matrix[columns]
+    n_measures = len(columns)
+    if n_measures < 3:
+        raise ValueError("At least three usable measures are required.")
 
-    # Calculate Spearman correlation and p-values
-    C, P = spearmanr(M)
+    corr, p_values = spearmanr(matrix)
+    corr = np.asarray(corr, dtype=float)
+    p_values = np.asarray(p_values, dtype=float)
 
-    # Fallback if spearmanr returns scalars for small inputs
-    if np.isscalar(C):
-        C = np.array([[1.0, C], [C, 1.0]])
-        P = np.array([[0.0, P], [P, 0.0]])
+    # ``spearmanr`` can return scalars for two-variable inputs.
+    if corr.ndim == 0:
+        corr_value = float(corr)
+        p_value = float(p_values)
+        corr = np.array([[1.0, corr_value], [corr_value, 1.0]])
+        p_values = np.array([[0.0, p_value], [p_value, 0.0]])
 
-    np.fill_diagonal(C, 1.0)
+    np.fill_diagonal(corr, 1.0)
 
-    # Distance metric for clustering based on the unmasked correlations
-    D = 1.0 - np.abs(C)
-    np.fill_diagonal(D, 0.0)
-    D = 0.5 * (D + D.T)                      # enforce symmetry for squareform
+    distance = 1.0 - np.abs(corr)
+    np.fill_diagonal(distance, 0.0)
+    distance = 0.5 * (distance + distance.T)
+    condensed = squareform(distance, checks=False)
 
-    # Hierarchical clustering
-    Z = sch.linkage(squareform(D, checks=False), method=method)
-
-    # Apply optimal leaf ordering for smoother visual transitions
-    Z = sch.optimal_leaf_ordering(Z, squareform(D, checks=False))
+    linkage = sch.linkage(condensed, method=method)
+    linkage = sch.optimal_leaf_ordering(linkage, condensed)
 
     if figsize is None:
-        figsize = (0.5 * n + 3.0, 0.5 * n + 3.0)
+        figsize = (0.5 * n_measures + 3.0, 0.5 * n_measures + 3.0)
+
     fig = plt.figure(figsize=figsize)
-    gs = fig.add_gridspec(2, 2, height_ratios=[1, 5], width_ratios=[1, 0.045],
-                          hspace=0.03, wspace=0.03)
-    axd = fig.add_subplot(gs[0, 0])
-    axh = fig.add_subplot(gs[1, 0])
-    cax = fig.add_subplot(gs[1, 1])
+    grid = fig.add_gridspec(
+        2,
+        2,
+        height_ratios=[1, 5],
+        width_ratios=[1, 0.045],
+        hspace=0.03,
+        wspace=0.03,
+    )
+    dendrogram_ax = fig.add_subplot(grid[0, 0])
+    heatmap_ax = fig.add_subplot(grid[1, 0])
+    colorbar_ax = fig.add_subplot(grid[1, 1])
 
-    # Sort branches so smaller groups fall to the left
-    dinfo = sch.dendrogram(Z, ax=axd, no_labels=True, color_threshold=0,
-                           above_threshold_color="0.4", count_sort="ascending")
-    axd.set_xlim(0, 10 * n)
-    axd.axis("off")
+    dendrogram = sch.dendrogram(
+        linkage,
+        ax=dendrogram_ax,
+        no_labels=True,
+        color_threshold=0,
+        above_threshold_color="0.4",
+        count_sort="ascending",
+    )
+    dendrogram_ax.set_xlim(0, 10 * n_measures)
+    dendrogram_ax.axis("off")
 
-    # Extract the ordered leaves directly from the dendrogram
-    order = dinfo["leaves"]
-    cols_ord = [cols[i] for i in order]
+    order = [int(index) for index in dendrogram["leaves"]]
+    ordered_columns = [columns[index] for index in order]
 
-    # Apply significance mask where p > 0.05 becomes 0 for display only
-    C_masked = np.where(P > 0.05, 0.0, C)
-    Cor = C_masked[np.ix_(order, order)]
+    displayed_corr = np.where(p_values > 0.05, 0.0, corr)
+    ordered_corr = displayed_corr[np.ix_(order, order)]
 
-    im = axh.imshow(Cor, extent=[0, 10 * n, 10 * n, 0], aspect="auto",
-                    cmap=cmap, vmin=-1, vmax=1)
-    ticks = [10 * p + 5 for p in range(n)]
-    axh.set_xticks(ticks)
-    axh.set_xticklabels(cols_ord, rotation=90, fontsize=8)
-    axh.set_yticks(ticks)
-    axh.set_yticklabels(cols_ord, fontsize=8)
-    axh.set_xlim(0, 10 * n)
-    axh.set_ylim(10 * n, 0)
-    fig.colorbar(im, cax=cax, label="Spearman R (p < 0.05)")
+    image = heatmap_ax.imshow(
+        ordered_corr,
+        extent=[0, 10 * n_measures, 10 * n_measures, 0],
+        aspect="auto",
+        cmap=_resolve_cmap(cmap),
+        vmin=-1,
+        vmax=1,
+    )
+    ticks = [10 * position + 5 for position in range(n_measures)]
+    heatmap_ax.set_xticks(ticks)
+    heatmap_ax.set_xticklabels(ordered_columns, rotation=90, fontsize=8)
+    heatmap_ax.set_yticks(ticks)
+    heatmap_ax.set_yticklabels(ordered_columns, fontsize=8)
+    heatmap_ax.set_xlim(0, 10 * n_measures)
+    heatmap_ax.set_ylim(10 * n_measures, 0)
+    fig.colorbar(image, cax=colorbar_ax, label="Spearman r (p < 0.05)")
 
-    groups = None
-    if n_groups:
-        g = sch.fcluster(Z, t=n_groups, criterion="maxclust")
-        g_ord = g[order]
+    groups: Optional[Dict[str, int]] = None
+    if n_groups is not None:
+        cluster_ids = sch.fcluster(linkage, t=n_groups, criterion="maxclust")
+        ordered_cluster_ids = cluster_ids[order]
         start = 0
-        for k in range(1, n + 1):
-            if k == n or g_ord[k] != g_ord[start]:
-                lo, hi = 10 * start, 10 * k
-                axh.add_patch(plt.Rectangle((lo, lo), hi - lo, hi - lo,
-                                            fill=False, edgecolor="black",
-                                            linewidth=1.6))
-                start = k
-        groups = {cols[i]: int(g[i]) for i in range(n)}
+        for stop in range(1, n_measures + 1):
+            if stop == n_measures or ordered_cluster_ids[stop] != ordered_cluster_ids[start]:
+                lower = 10 * start
+                upper = 10 * stop
+                heatmap_ax.add_patch(
+                    plt.Rectangle(
+                        (lower, lower),
+                        upper - lower,
+                        upper - lower,
+                        fill=False,
+                        edgecolor="black",
+                        linewidth=1.6,
+                    )
+                )
+                start = stop
+        groups = {
+            columns[index]: int(cluster_ids[index])
+            for index in range(n_measures)
+        }
 
-    axd.set_title("Correlation clustermap   "
-                  "(order by 1 - |r|, color = signed r, p > 0.05 masked)", fontsize=9)
-    return fig, {"order": cols_ord, "linkage": Z, "measures": cols,
-                 "groups": groups}
+    dendrogram_ax.set_title(
+        "Correlation clustermap "
+        "(order by 1 - |r|; color = signed r; p > 0.05 masked)",
+        fontsize=9,
+    )
+
+    info: ClustermapInfo = {
+        "order": ordered_columns,
+        "linkage": linkage,
+        "measures": columns,
+        "groups": groups,
+    }
+    return fig, info
