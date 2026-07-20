@@ -6,21 +6,23 @@ change displayed coordinates only; analytical coordinates in trial dictionaries
 are not changed.
 """
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
-import numpy as np
-from numpy.typing import ArrayLike
-import pandas as pd
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import seaborn as sns
+from numpy.typing import ArrayLike
 
 from erpa.core.session import DEFAULT_FRAMERATE
 
-SIDE_LABELS = {0: "L", 1: "R"}
+SIDE_LABELS: Dict[int, str] = {0: "L", 1: "R"}
 
 
 Trial = Dict[str, Any]
 Ports = Optional[Union[np.ndarray, Dict[str, ArrayLike]]]
+OrientationName = Literal["raw", "paper"]
+KinematicKind = Literal["lin_vel", "ang_vel"]
 
 
 class ViewTransform:
@@ -42,7 +44,12 @@ class ViewTransform:
         If True, flip the vertical display axis.
     """
 
-    def __init__(self, n_rot: int = 1, flip_u: bool = False, flip_v: bool = False):
+    def __init__(
+        self,
+        n_rot: int = 1,
+        flip_u: bool = False,
+        flip_v: bool = False,
+    ) -> None:
         self.n_rot = n_rot % 4
         self.flip_u = flip_u
         self.flip_v = flip_v
@@ -87,11 +94,14 @@ RAW_VIEW = ViewTransform(n_rot=0)
 PORTS_TOP = ViewTransform(n_rot=3, flip_v=True)
 
 # Display orientations selectable by name in the trajectory plotters.
-ORIENTATIONS = {"raw": RAW_VIEW, "paper": PORTS_TOP}
+ORIENTATIONS: Dict[OrientationName, ViewTransform] = {
+    "raw": RAW_VIEW,
+    "paper": PORTS_TOP,
+}
 
 
 def _orientation_transform(
-    orientation: str = "paper",
+    orientation: OrientationName = "paper",
     transform: Optional[ViewTransform] = None,
 ) -> ViewTransform:
     """Resolve the display transform for trajectory plots.
@@ -125,7 +135,7 @@ def _orientation_transform(
 
 
 def _select_trials(
-    trials: List[Trial],
+    trials: Sequence[Trial],
     trial_indices: Optional[Sequence[int]],
 ) -> List[Trial]:
     """Select trials by behavioral trial index.
@@ -145,11 +155,11 @@ def _select_trials(
         in ``trials`` are skipped.
     """
     if trial_indices is None:
-        return trials
+        return list(trials)
     by_idx = {t["idx"]: t for t in trials}
     return [by_idx[i] for i in trial_indices if i in by_idx]
 
-OKABE_ITO = {
+OKABE_ITO: Dict[str, str] = {
     "orange": "#E69F00",
     "sky_blue": "#56B4E9",
     "bluish_green": "#009E73",
@@ -160,7 +170,7 @@ OKABE_ITO = {
     "black": "#000000",
 }
 
-OKABE_CYCLE = [
+OKABE_CYCLE: List[str] = [
     OKABE_ITO["blue"],
     OKABE_ITO["orange"],
     OKABE_ITO["bluish_green"],
@@ -171,49 +181,12 @@ OKABE_CYCLE = [
     OKABE_ITO["black"],
 ]
 
-# Correct / hit trials use Okabe-Ito blue. Error / miss trials use
-# vermillion. These are also the substitutions for tab:blue and tab:red.
-OUTCOME_COLORS = {1: OKABE_ITO["blue"], 0: OKABE_ITO["vermillion"]}
 
-# Side colors retain a blue/orange contrast while staying within Okabe-Ito.
-SIDE_COLORS = {0: OKABE_ITO["blue"], 1: OKABE_ITO["orange"]}
-
-
-# Common event colors used across single-trial and grid plots.
-EVENT_COLORS = {
-    "center_entry": OKABE_ITO["black"],
-    "center_exit": OKABE_ITO["orange"],
-    "choice_entry": OKABE_ITO["reddish_purple"],
+EVENT_COLORS: Dict[str, str] = {
+    "center_entry": OKABE_ITO["orange"],
+    "center_exit": OKABE_ITO["reddish_purple"],
+    "choice_entry": OKABE_ITO["bluish_green"],
 }
-
-
-def _trial_color(trial: Trial, color_by: str) -> Union[str, np.ndarray]:
-    """Return a plotting color for one trial.
-
-    Parameters
-    ----------
-    trial : dict
-        Trial dictionary with behavioral fields.
-    color_by : str
-        Trial field used for color selection. Supported values are ``'error'``,
-        ``'target'``, ``'choice'``, and ``'cue'``.
-
-    Returns
-    -------
-    str or np.ndarray
-        Matplotlib color specification.
-    """
-    if color_by == "error":
-        return OUTCOME_COLORS[1 - trial["error"]]
-    if color_by == "target":
-        return SIDE_COLORS[trial["target"]]
-    if color_by == "choice":
-        return SIDE_COLORS[trial["choice"]]
-    if color_by == "cue":
-        cue_map = {1: OKABE_ITO["blue"], 4: OKABE_ITO["sky_blue"],
-                   16: OKABE_ITO["bluish_green"]}
-        return cue_map.get(int(trial.get("cue", 1)), OKABE_ITO["black"])
-    return OKABE_ITO["black"]
 
 
 def _trial_event_index(trial: Trial, name: str) -> Optional[int]:
@@ -287,6 +260,147 @@ def _ports_to_display_points(
     return transform.apply(arr), labels
 
 
+def _align_ports(ports: Ports) -> Ports:
+    """Align response ports for display.
+
+    The three response ports are projected onto a shared vertical line at the
+    mean of their x coordinates. The center port is placed at the midpoint of
+    the two side ports along that line. A reward port, if present, is aligned
+    to the same shared x. The aligned coordinates are used only for plotting;
+    analytical functions must use the original port coordinates.
+
+    Parameters
+    ----------
+    ports : dict, np.ndarray, or None
+        Port coordinates in raw arena coordinates. A dictionary is expected,
+        keyed by ``'center'``, ``'choice_L'``, ``'choice_R'``, and optionally
+        ``'reward'``. Non-dictionary inputs are returned unchanged, since
+        alignment needs named ports.
+
+    Returns
+    -------
+    dict, np.ndarray, or None
+        Aligned copy of ``ports``. Non-dictionary inputs are passed through.
+    """
+    if not isinstance(ports, dict):
+        return ports
+
+    required = ("center", "choice_L", "choice_R")
+    if not all(key in ports for key in required):
+        return ports
+
+    left = np.asarray(ports["choice_L"], dtype=float)
+    right = np.asarray(ports["choice_R"], dtype=float)
+    shared_x = float(np.mean([
+        np.asarray(ports[key], dtype=float)[0] for key in required
+    ]))
+    midpoint_y = float(0.5 * (left[1] + right[1]))
+
+    aligned = dict(ports)
+    aligned["choice_L"] = np.array([shared_x, left[1]])
+    aligned["choice_R"] = np.array([shared_x, right[1]])
+    aligned["center"] = np.array([shared_x, midpoint_y])
+    if "reward" in ports:
+        reward = np.asarray(ports["reward"], dtype=float)
+        aligned["reward"] = np.array([shared_x, reward[1]])
+    return aligned
+
+
+def _offset_ports_display(
+    port_disp: np.ndarray,
+    snout_offset_px: float,
+) -> np.ndarray:
+    """Shift port markers away from trajectory endpoints for display.
+
+    The tracked centroid stops short of each port by roughly the distance from
+    the head marker to the snout, so port estimates read from pose data fall
+    inside the trajectory cloud. Markers are shifted by a fixed amount along the
+    positive vertical display axis, which points away from the trajectories when
+    the response ports are drawn across the top of the plot.
+    A fixed vertical shift is exact only when the ports sit across the top of
+    the display, which is the ``paper`` orientation. Do not use the offset when
+    plotting single trials using raw orientations.
+
+    Parameters
+    ----------
+    port_disp : np.ndarray
+        Transformed port coordinates with shape ``(n_ports, 2)``.
+    snout_offset_px : float
+        Vertical shift in display pixels. The plotting functions use a
+        configurable default that approximates the head-to-snout distance.
+
+    Returns
+    -------
+    np.ndarray
+        Shifted copy of ``port_disp``. Empty input is returned unchanged.
+    """
+    if port_disp.size == 0:
+        return port_disp
+    shifted = port_disp.copy()
+    shifted[:, 1] = shifted[:, 1] + float(snout_offset_px)
+    return shifted
+
+
+def _display_ports(
+    ports: Ports,
+    transform: ViewTransform,
+    align: bool,
+    snout_offset_px: float,
+) -> Tuple[np.ndarray, List[str]]:
+    """Return display-ready port points, optionally aligned and offset.
+
+    Alignment is applied in raw coordinates, followed by the display
+    transform and then the vertical marker offset. Both corrections are
+    display-only and are applied only when requested.
+
+    Parameters
+    ----------
+    ports : dict, np.ndarray, or None
+        Port coordinates in raw arena coordinates.
+    transform : ViewTransform
+        Display transform applied before plotting.
+    align : bool
+        If True, force the response ports collinear and equally spaced.
+    snout_offset_px : float
+        Vertical display shift applied to port markers. Zero disables the
+        offset.
+
+    Returns
+    -------
+    np.ndarray
+        Display-ready port coordinates with shape ``(n_ports, 2)``.
+    list of str
+        Port labels.
+    """
+    prepared = _align_ports(ports) if align else ports
+    port_disp, labels = _ports_to_display_points(prepared, transform)
+    if snout_offset_px:
+        port_disp = _offset_ports_display(port_disp, snout_offset_px)
+    return port_disp, labels
+
+
+# Default display offset between tracked head positions and port markers.
+# The offset is applied only when ``offset_ports=True``.
+DEFAULT_SNOUT_OFFSET_PX: float = 50.0
+
+
+def _style_axis(ax: plt.Axes, label_size: int = 8, tick_size: int = 8) -> None:
+    """Set tick and axis-label font sizes for a compact panel.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes to restyle.
+    label_size : int, optional
+        Font size for the x and y axis labels.
+    tick_size : int, optional
+        Font size for the tick labels.
+    """
+    ax.tick_params(labelsize=tick_size)
+    ax.xaxis.label.set_size(label_size)
+    ax.yaxis.label.set_size(label_size)
+
+
 def _set_equal_xy_limits(
     ax: plt.Axes,
     point_arrays: Sequence[np.ndarray],
@@ -356,10 +470,9 @@ def _get_heading_direction(
 ) -> Optional[np.ndarray]:
     """Return heading direction in radians.
 
-    The function first checks for ``heading_direction``, then ``heading_dir``,
-    and then falls back to ``head_angle``. If ``prefer_display_heading`` is
-    True, angles are transformed so that they match the displayed trajectory
-    orientation.
+    Heading is read from ``heading_direction``, ``heading_dir``, or
+    ``head_angle`` in that order. When ``prefer_display_heading`` is True, the
+    angles are transformed to match the displayed trajectory orientation.
 
     Parameters
     ----------
@@ -514,20 +627,174 @@ def _plot_velocity_panel(
     sns.despine(ax=ax)
 
 
+def _draw_trajectory_panel(
+    ax: plt.Axes,
+    trial: Trial,
+    transform: ViewTransform,
+    port_disp: np.ndarray,
+    show_heading: bool = True,
+    heading_every: int = 5,
+    heading_len: float = 24.0,
+    port_marker: str = "s",
+    port_size: float = 85.0,
+    limit_arrays: Optional[Sequence[np.ndarray]] = None,
+    pad_frac: float = 0.25,
+) -> np.ndarray:
+    """Draw one centroid trajectory with heading arrows, ports, and start.
+
+    Both ``plot_trial`` and ``plot_trajectory_grid`` use this drawing
+    routine so that paths are rendered consistently. The path is
+    split at center entry into a pre-entry and a post-entry segment. Heading
+    arrows are drawn at a fixed frame interval when heading data are present.
+    The ports and the start marker are drawn on top.
+
+    The caller passes ``port_disp`` already transformed, aligned, and offset, so
+    this helper does not repeat those corrections. The caller also passes
+    ``limit_arrays`` to control the view. A grid passes the full port geometry
+    there, so every panel shares one centered frame rather than cropping to its
+    own path.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes receiving the trajectory.
+    trial : dict
+        Trial dictionary.
+    transform : ViewTransform
+        Display transform applied to the centroid and heading vectors.
+    port_disp : np.ndarray
+        Display-ready port coordinates, shape ``(n_ports, 2)``.
+    show_heading : bool, optional
+        If True, draw heading arrows.
+    heading_every : int, optional
+        Draw one heading arrow every ``heading_every`` frames.
+    heading_len : float, optional
+        Heading arrow length in pixels before the display transform.
+    port_marker : str, optional
+        Marker for ports.
+    port_size : float, optional
+        Marker size for ports.
+    limit_arrays : sequence of np.ndarray or None, optional
+        Point arrays used to set the view limits. If None, the trajectory and
+        the ports are used, which crops to the single trial. Pass a shared set
+        to center every panel of a grid on the same frame.
+    pad_frac : float, optional
+        Fractional padding around the view limits.
+
+    Returns
+    -------
+    np.ndarray
+        The centroid path in display coordinates, shape ``(n, 2)``.
+    """
+    pre_color = OKABE_ITO["sky_blue"]
+    post_color = OKABE_ITO["blue"]
+    port_color = OKABE_ITO["black"]
+
+    centroid = np.asarray(trial["centroid"], dtype=float)
+    disp = transform.apply(centroid)
+    n = len(disp)
+
+    center_idx = _trial_event_index(trial, "center_entry")
+    t = np.asarray(trial.get("t", []), dtype=float)
+    if center_idx is None or not (0 <= center_idx < n):
+        if t.size == n and np.any(np.isfinite(t)):
+            center_idx = int(np.nanargmin(np.abs(t)))
+        else:
+            center_idx = 0
+
+    if center_idx > 1:
+        ax.plot(disp[:center_idx + 1, 0], disp[:center_idx + 1, 1],
+                color=pre_color, linewidth=2.1, alpha=0.95,
+                solid_capstyle="round", label="before center entry")
+    if center_idx < n - 1:
+        ax.plot(disp[center_idx:, 0], disp[center_idx:, 1],
+                color=post_color, linewidth=2.1, alpha=0.95,
+                solid_capstyle="round", label="after center entry")
+
+    if show_heading:
+        heading_for_arrows = _get_heading_direction(
+            trial, transform=transform, prefer_display_heading=False)
+        if heading_for_arrows is not None and len(heading_for_arrows) == n:
+            hvec = transform.apply(
+                np.column_stack((np.cos(heading_for_arrows),
+                                 np.sin(heading_for_arrows))) * heading_len)
+            idx = np.arange(0, n, max(1, int(heading_every)))
+            finite = (np.isfinite(disp[idx]).all(axis=1)
+                      & np.isfinite(hvec[idx]).all(axis=1))
+            idx = idx[finite]
+            ax.quiver(disp[idx, 0], disp[idx, 1], hvec[idx, 0], hvec[idx, 1],
+                      angles="xy", scale_units="xy", scale=1.0,
+                      width=0.0045, color=OKABE_ITO["black"],
+                      alpha=0.35, zorder=3)
+
+    if len(port_disp):
+        ax.scatter(port_disp[:, 0], port_disp[:, 1], s=port_size,
+                   marker=port_marker, facecolors="white",
+                   edgecolors=port_color, linewidths=1.3, zorder=5,
+                   label="ports")
+
+    ax.scatter(disp[0, 0], disp[0, 1], s=46, marker="o",
+               facecolors=OKABE_ITO["black"], edgecolors="white",
+               linewidths=0.8, zorder=6, label="start")
+
+    arrays = limit_arrays if limit_arrays is not None else [disp, port_disp]
+    _set_equal_xy_limits(ax, arrays, pad_frac=pad_frac)
+    return disp
+
+
+def _mark_trajectory_events(
+    ax: plt.Axes,
+    trial: Trial,
+    disp: np.ndarray,
+    n: int,
+    mark_events: Sequence[str],
+    marker_event_labels: Dict[str, str],
+) -> None:
+    """Mark named events as open circles on the trajectory panel.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Trajectory axes.
+    trial : dict
+        Trial dictionary.
+    disp : np.ndarray
+        Centroid path in display coordinates, shape ``(n, 2)``.
+    n : int
+        Number of samples in the path.
+    mark_events : sequence of str
+        Event names to mark.
+    marker_event_labels : dict
+        Mapping from event name to legend label.
+    """
+    for name in mark_events:
+        idx = _trial_event_index(trial, name)
+        if idx is not None and 0 <= idx < n:
+            ax.scatter(disp[idx, 0], disp[idx, 1], s=46, marker="o",
+                       facecolors="white",
+                       edgecolors=EVENT_COLORS.get(name, OKABE_ITO["black"]),
+                       linewidths=1.5, zorder=7,
+                       label=marker_event_labels.get(
+                           name, name.replace("_", " ")))
+
+
 def plot_trial(
     trial: Trial,
     ports: Ports = None,
     transform: Optional[ViewTransform] = None,
     heading_every: int = 5,
     heading_len: float = 24.0,
-    figsize: Tuple[float, float] = (11.5, 5.8),
+    figsize: Tuple[float, float] = (8, 6),
     dpi: int = 140,
     show_heading: bool = True,
-    mark_events: Sequence[str] = ("choice_entry",),
+    mark_events: Sequence[str] = ("center_entry", "choice_entry",),
     port_marker: str = "s",
     port_size: float = 85.0,
     unwrap_heading: bool = True,
     prefer_display_heading: bool = False,
+    align_ports: bool = True,
+    offset_ports: bool = True,
+    snout_offset_px: float = DEFAULT_SNOUT_OFFSET_PX,
 ) -> plt.Figure:
     """Plot one trial with trajectory, heading direction, and velocity panels.
 
@@ -567,6 +834,16 @@ def plot_trial(
     prefer_display_heading : bool, optional
         If True, convert heading angles into display coordinates before
         plotting the heading direction trace.
+    align_ports : bool, optional
+        If True, force the response ports collinear and equally spaced for
+        display. The correction affects plotted coordinates only.
+    offset_ports : bool, optional
+        If True, shift port markers away from the trajectory endpoints by
+        ``snout_offset_px`` along the vertical display axis. This corrects for
+        the tracked point stopping short of the port. Display only.
+    snout_offset_px : float, optional
+        Vertical shift used when ``offset_ports`` is True. Defaults to
+        ``DEFAULT_SNOUT_OFFSET_PX``.
 
     Returns
     -------
@@ -608,53 +885,19 @@ def plot_trial(
     if len(t) != n:
         raise ValueError("centroid and time arrays must have the same length.")
 
-    center_idx = _trial_event_index(trial, "center_entry")
-    if center_idx is None or not (0 <= center_idx < n):
-        if np.any(np.isfinite(t)):
-            center_idx = int(np.nanargmin(np.abs(t)))
-        else:
-            center_idx = 0
+    port_disp, _port_labels = _display_ports(
+        ports,
+        transform,
+        align=align_ports,
+        snout_offset_px=snout_offset_px if offset_ports else 0.0,
+    )
 
-    if center_idx > 1:
-        ax_traj.plot(disp[:center_idx + 1, 0], disp[:center_idx + 1, 1],
-                     color=pre_color, linewidth=2.1, alpha=0.95,
-                     solid_capstyle="round", label="before center entry")
-
-    if center_idx < n - 1:
-        ax_traj.plot(disp[center_idx:, 0], disp[center_idx:, 1],
-                     color=post_color, linewidth=2.1, alpha=0.95,
-                     solid_capstyle="round", label="after center entry")
-
-    if show_heading:
-        heading_for_arrows = _get_heading_direction(
-            trial,
-            transform=transform,
-            prefer_display_heading=False,
-        )
-        if heading_for_arrows is not None and len(heading_for_arrows) == n:
-            hvec = transform.apply(
-                np.column_stack((np.cos(heading_for_arrows),
-                                 np.sin(heading_for_arrows))) * heading_len)
-            idx = np.arange(0, n, max(1, int(heading_every)))
-            finite = (np.isfinite(disp[idx]).all(axis=1)
-                      & np.isfinite(hvec[idx]).all(axis=1))
-            idx = idx[finite]
-            ax_traj.quiver(disp[idx, 0], disp[idx, 1],
-                           hvec[idx, 0], hvec[idx, 1],
-                           angles="xy", scale_units="xy", scale=1.0,
-                           width=0.0045, color=OKABE_ITO["black"],
-                           alpha=0.35, zorder=3)
-
-    port_disp, _port_labels = _ports_to_display_points(ports, transform)
-    if len(port_disp):
-        ax_traj.scatter(port_disp[:, 0], port_disp[:, 1], s=port_size,
-                        marker=port_marker, facecolors="white",
-                        edgecolors=port_color, linewidths=1.3, zorder=5,
-                        label="ports")
-
-    ax_traj.scatter(disp[0, 0], disp[0, 1], s=46, marker="o",
-                    facecolors=OKABE_ITO["black"], edgecolors="white",
-                    linewidths=0.8, zorder=6, label="start")
+    disp = _draw_trajectory_panel(
+        ax_traj, trial, transform, port_disp,
+        show_heading=show_heading, heading_every=heading_every,
+        heading_len=heading_len, port_marker=port_marker, port_size=port_size,
+        pad_frac=0.25,
+    )
 
     marker_event_labels = {
         "center_entry": "center entry",
@@ -662,21 +905,15 @@ def plot_trial(
         "choice_entry": "choice entry",
     }
 
-    for name in mark_events:
-        idx = _trial_event_index(trial, name)
-        if idx is not None and 0 <= idx < n:
-            ax_traj.scatter(disp[idx, 0], disp[idx, 1], s=58, marker="o",
-                            facecolors="white",
-                            edgecolors=EVENT_COLORS.get(name, OKABE_ITO["black"]),
-                            linewidths=1.5, zorder=7,
-                            label=marker_event_labels.get(
-                                name, name.replace("_", " ")))
-
-    _set_equal_xy_limits(ax_traj, [disp, port_disp], pad_frac=0.10)
+    if mark_events:
+        _mark_trajectory_events(
+            ax_traj, trial, disp, len(disp), mark_events, marker_event_labels
+        )
 
     ax_traj.set_xlabel("display horizontal (px)")
     ax_traj.set_ylabel("display vertical, ports at top (px)")
-    ax_traj.set_title("trajectory", fontsize=10)
+    ax_traj.set_title("trajectory", fontsize=9)
+    _style_axis(ax_traj)
     sns.despine(ax=ax_traj)
 
     _plot_heading_panel(
@@ -709,7 +946,10 @@ def plot_trial(
         zero_line=True,
     )
 
-    ax_head.set_title("heading and velocity", fontsize=10)
+    for panel in (ax_head, ax_lin, ax_ang):
+        _style_axis(panel)
+
+    ax_head.set_title("heading and velocity", fontsize=9)
     ax_ang.set_xlabel("time from center entry (s)")
     plt.setp(ax_head.get_xticklabels(), visible=False)
     plt.setp(ax_lin.get_xticklabels(), visible=False)
@@ -724,6 +964,8 @@ def plot_trial(
              f"target {_side_label(trial.get('target', '?'))}  "
              f"choice {_side_label(trial.get('choice', '?'))}  "
              f"{_outcome_label(trial.get('error', '?'))}")
+    if "trial_type" in trial and trial["trial_type"] is not None:
+        title = f"{title}  type {trial['trial_type']}"
     fig.suptitle(title, x=0.08, ha="left", fontsize=11)
 
     legend_handles = [
@@ -765,7 +1007,7 @@ def plot_trial(
     return fig
 
 
-PORT_STYLE = {
+PORT_STYLE: Dict[str, Tuple[str, str, str]] = {
     "center": ("s", OKABE_ITO["black"], "center"),
     "choice_L": ("s", OKABE_ITO["black"], "choice L"),
     "choice_R": ("s", OKABE_ITO["black"], "choice R"),
@@ -778,6 +1020,8 @@ def _draw_ports(
     transform: ViewTransform,
     size: float = 240,
     label: bool = True,
+    align: bool = False,
+    snout_offset_px: float = 0.0,
 ) -> None:
     """Draw port markers on an axes object.
 
@@ -794,25 +1038,33 @@ def _draw_ports(
         Marker size.
     label : bool, optional
         If True, add labels for the legend.
+    align : bool, optional
+        If True, force the response ports collinear and equally spaced before
+        drawing. Display only.
+    snout_offset_px : float, optional
+        Vertical display shift applied to port markers. Zero disables the
+        offset. Display only.
     """
     if ports is None:
         return
-    if isinstance(ports, dict):
-        for key, pt in ports.items():
+    prepared = _align_ports(ports) if align else ports
+    if isinstance(prepared, dict):
+        for key, pt in prepared.items():
             marker, col, name = PORT_STYLE.get(key, ("s", OKABE_ITO["black"], key))
             d = transform.apply(np.asarray(pt))
+            d = _offset_ports_display(d.reshape(1, 2), snout_offset_px)[0]
             ax.scatter(d[0], d[1], s=size, marker=marker,
                        facecolors="white", edgecolors=col, linewidth=1.0,
                        zorder=2, label=name if label else None)
     else:
-        d = transform.apply(np.asarray(ports))
+        d = transform.apply(np.asarray(prepared))
+        d = _offset_ports_display(np.atleast_2d(d), snout_offset_px)
         ax.scatter(d[:, 0], d[:, 1], s=size, marker="s",
                    facecolors="white", edgecolors=OKABE_ITO["black"],
                    linewidth=1.0, zorder=2,
                    label="ports" if label else None)
 
 
-# Backward-compatible wrapper for older code that calls _vel_panel directly.
 def _vel_panel(
     ax: plt.Axes,
     trial: Trial,
@@ -830,20 +1082,24 @@ def _vel_panel(
 
 
 def plot_trajectory_grid(
-    trials: List[Trial],
+    trials: Sequence[Trial],
     ports: Ports = None,
     transform: ViewTransform = PORTS_TOP,
-    color_by: str = "error",
     n_cols: int = 6,
     trial_indices: Optional[Sequence[int]] = None,
     heading_every: int = 4,
     heading_len: float = 26.0,
+    align_ports: bool = True,
+    offset_ports: bool = True,
+    snout_offset_px: float = DEFAULT_SNOUT_OFFSET_PX,
 ) -> plt.Figure:
     """Plot multiple trajectories as small panels.
 
-    Each panel shows one trial. The centroid path is transformed for display,
-    heading arrows are drawn at regular frame intervals, and the center-exit
-    position is marked.
+    Each panel uses the trajectory drawing from ``plot_trial``. Paths are
+    split at center entry, and heading arrows use the same rendering settings.
+    Axis labels are omitted to keep the panels compact.
+    The ports and the trajectories are centered on the shared port geometry, so
+    every panel uses one common frame rather than cropping to its own path.
 
     Parameters
     ----------
@@ -854,9 +1110,6 @@ def plot_trajectory_grid(
         ``(n_ports, 2)``. Dictionaries map port labels to ``(x, y)`` positions.
     transform : ViewTransform, optional
         Display transform applied to trajectories, heading vectors, and ports.
-    color_by : str, optional
-        Trial field used for color selection. Supported values are ``'hit'``,
-        ``'target'``, ``'choice'``, and ``'cue'``.
     n_cols : int, optional
         Number of panels per row.
     trial_indices : sequence of int or None, optional
@@ -866,6 +1119,16 @@ def plot_trajectory_grid(
         Draw one heading arrow every ``heading_every`` frames.
     heading_len : float, optional
         Heading arrow length in pixels before the display transform is applied.
+    align_ports : bool, optional
+        If True, force the response ports collinear and equally spaced for
+        display. Display only. Defaults to True.
+    offset_ports : bool, optional
+        If True, shift port markers away from the trajectory endpoints by
+        ``snout_offset_px`` along the vertical display axis. Display only.
+        Defaults to True.
+    snout_offset_px : float, optional
+        Vertical shift used when ``offset_ports`` is True. Defaults to
+        ``DEFAULT_SNOUT_OFFSET_PX``.
 
     Returns
     -------
@@ -879,27 +1142,25 @@ def plot_trajectory_grid(
                              dpi=130)
     axes = np.atleast_1d(axes).ravel()
 
-    pdraw = ports
+    port_disp, _port_labels = _display_ports(
+        ports, transform, align=align_ports,
+        snout_offset_px=snout_offset_px if offset_ports else 0.0)
+
+    # Center every panel on one shared frame. The frame spans the ports and all
+    # centroid paths, so panels are directly comparable and not cropped to each
+    # single trial.
+    all_paths = [transform.apply(np.asarray(t["centroid"], dtype=float))
+                 for t in trials]
+    limit_arrays = list(all_paths)
+    if len(port_disp):
+        limit_arrays = limit_arrays + [port_disp]
 
     for ax, trial in zip(axes, trials):
-        disp = transform.apply(trial["centroid"])
-        col = _trial_color(trial, color_by)
-        ax.plot(disp[:, 0], disp[:, 1], color=col, linewidth=1.3, alpha=0.9)
-
-        ang = trial["head_angle"]
-        hvec = transform.apply(np.stack([np.cos(ang), np.sin(ang)], axis=1) * heading_len)
-        k = slice(0, len(disp), max(1, heading_every))
-        ax.quiver(disp[k, 0], disp[k, 1], hvec[k, 0], hvec[k, 1],
-                  angles="xy", scale_units="xy", scale=1.0, width=0.012,
-                  color=OKABE_ITO["black"], alpha=0.35, zorder=3)
-
-        e = trial["events"]["center_exit"]
-        if 0 <= e < len(disp):
-            ax.scatter(disp[e, 0], disp[e, 1], s=18, color=EVENT_COLORS["center_exit"], zorder=4)
-        ax.scatter(disp[0, 0], disp[0, 1], s=12, color=OKABE_ITO["black"], zorder=4)
-
-        _draw_ports(ax, pdraw, transform, size=70, label=False)
-
+        _draw_trajectory_panel(
+            ax, trial, transform, port_disp,
+            show_heading=True, heading_every=heading_every,
+            heading_len=heading_len, port_marker="s", port_size=70.0,
+            limit_arrays=limit_arrays, pad_frac=0.08)
         ax.set_aspect("equal")
         ax.set_xticks([]); ax.set_yticks([])
         ax.set_title(f"{trial['idx']} {SIDE_LABELS[trial['target']]}"
@@ -909,15 +1170,13 @@ def plot_trajectory_grid(
 
     for ax in axes[n:]:
         ax.set_visible(False)
-    fig.suptitle(f"trajectories colored by {color_by}, ports at top", fontsize=11)
-    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.tight_layout()
     return fig
 
 
 def plot_kinematics_grid(
-    trials: List[Trial],
-    kind: str = "lin_vel",
-    color_by: str = "error",
+    trials: Sequence[Trial],
+    kind: KinematicKind = "lin_vel",
     n_cols: int = 6,
     trial_indices: Optional[Sequence[int]] = None,
 ) -> plt.Figure:
@@ -929,9 +1188,6 @@ def plot_kinematics_grid(
         Trial dictionaries from ``build_trials`` or ``load_session``.
     kind : {'lin_vel', 'ang_vel'}, optional
         Trial field plotted on the y-axis.
-    color_by : str, optional
-        Trial field used for color selection. Supported values are ``'hit'``,
-        ``'target'``, ``'choice'``, and ``'cue'``.
     n_cols : int, optional
         Number of panels per row.
     trial_indices : sequence of int or None, optional
@@ -949,25 +1205,35 @@ def plot_kinematics_grid(
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(2.4 * n_cols, 1.9 * n_rows),
                              dpi=130, sharex=True)
     axes = np.atleast_1d(axes).ravel()
-    ylabel = "linear vel (cm/s)" if kind == "lin_vel" else "angular vel (rad/s)"
+    # Y range covers the peak magnitude across displayed trials, plus 10 percent
+    # headroom. Angular velocity is kept symmetric about zero.
+    allv = np.concatenate([np.asarray(t[kind], dtype=float) for t in trials])
+    finite = allv[np.isfinite(allv)]
+    peak = float(np.nanmax(np.abs(finite))) if finite.size else 1.0
+    hi = 1.10 * peak
+    lo = -hi if kind == "ang_vel" else 0.0
 
-    # common y range
-    allv = np.concatenate([t[kind] for t in trials])
-    lo, hi = np.nanpercentile(allv, [1, 99])
-    if kind == "ang_vel":
-        m = max(abs(lo), abs(hi)); lo, hi = -m, m
+    # X range tight to the span of the trial time vectors.
+    t_min = min(float(np.nanmin(t["t"])) for t in trials)
+    t_max = max(float(np.nanmax(t["t"])) for t in trials)
 
     for ax, trial in zip(axes, trials):
-        col = _trial_color(trial, color_by)
-        ax.plot(trial["t"], trial[kind], color=col, linewidth=1.4)
+        ax.plot(
+            trial["t"], trial[kind], color=OKABE_ITO["blue"], linewidth=1.4
+        )
         if kind == "ang_vel":
             ax.axhline(0, color=OKABE_ITO["black"], linewidth=0.6, linestyle=":", alpha=0.35)
-        for name, c in [("center_exit", EVENT_COLORS["center_exit"]), ("choice_entry", EVENT_COLORS["choice_entry"])]:
+        event_lines = (
+            ("center_exit", EVENT_COLORS["center_exit"]),
+            ("choice_entry", EVENT_COLORS["choice_entry"]),
+        )
+        for name, c in event_lines:
             e = trial["events"][name]
             if 0 <= e < len(trial["t"]):
                 ax.axvline(trial["t"][e], color=c, linewidth=1.0,
                            linestyle="--", alpha=0.8)
         ax.set_ylim(lo, hi)
+        ax.set_xlim(t_min, t_max)
         ax.set_xticks([]); ax.set_yticks([])
         ax.set_title(f"{trial['idx']} {SIDE_LABELS[trial['target']]}"
                      f"{'x' if trial['error'] else '+'}", fontsize=7)
@@ -976,8 +1242,17 @@ def plot_kinematics_grid(
 
     for ax in axes[n:]:
         ax.set_visible(False)
-    fig.suptitle(f"{ylabel} by trial, colored by {color_by}", fontsize=11)
-    plt.tight_layout(rect=[0, 0, 1, 0.97])
+
+    event_handles = [
+        plt.Line2D([0], [0], color=EVENT_COLORS["center_exit"], lw=1.0,
+                   ls="--", label="center exit"),
+        plt.Line2D([0], [0], color=EVENT_COLORS["choice_entry"], lw=1.0,
+                   ls="--", label="choice entry"),
+    ]
+    fig.legend(handles=event_handles, loc="upper left", frameon=False,
+        bbox_to_anchor=(0, 1.1),
+        fontsize=8, ncol=2, handlelength=2.0, columnspacing=1.2)
+    plt.tight_layout()
     return fig
 
 
@@ -1037,10 +1312,18 @@ def plot_epoch_velocity(
     if grouping is None:
         # Plot all trials together
         mean_vel = np.nanmean(epoch_velocity, axis=0)
-        sem_vel = np.nanstd(epoch_velocity, axis=0) / np.sqrt(np.sum(~np.isnan(epoch_velocity), axis=0))
+        sem_vel = np.nanstd(epoch_velocity, axis=0) / np.sqrt(
+            np.sum(~np.isnan(epoch_velocity), axis=0)
+        )
 
         ax.plot(time_axis, mean_vel, color=OKABE_ITO["blue"], linewidth=2)
-        ax.fill_between(time_axis, mean_vel - sem_vel, mean_vel + sem_vel, color=OKABE_ITO["blue"], alpha=0.25)
+        ax.fill_between(
+            time_axis,
+            mean_vel - sem_vel,
+            mean_vel + sem_vel,
+            color=OKABE_ITO["blue"],
+            alpha=0.25,
+        )
     else:
         # Plot by group
         unique_groups = np.unique(grouping[~np.isnan(grouping)])
@@ -1059,7 +1342,14 @@ def plot_epoch_velocity(
                           color=colors[idx], alpha=0.3)
 
     # Add vertical line at event time
-    ax.axvline(x=0, color=OKABE_ITO["black"], linestyle='--', linewidth=1, alpha=0.45, label='Event')
+    ax.axvline(
+        x=0,
+        color=OKABE_ITO["black"],
+        linestyle="--",
+        linewidth=1,
+        alpha=0.45,
+        label="Event",
+    )
 
     ax.set_xlabel('Time from event (ms)')
     ax.set_ylabel('Velocity (cm/s)')
@@ -1096,18 +1386,18 @@ def _view_limits(
 
 
 def plot_trajectories(
-    trials: List[Trial],
+    trials: Sequence[Trial],
     color_by: str = 'error',
     show_extrema: bool = False,
     show_full_arena: bool = False,
     max_trials_per_panel: int = 20,
-    orientation: str = "paper",
+    orientation: OrientationName = "paper",
     transform: Optional[ViewTransform] = None,
 ) -> plt.Figure:
     """Plot figure-prepared spatial trajectories.
 
-    This function reads the ``trajectory``, ``error``, ``localmin``, and
-    ``lmax_idx`` fields added by ``prepare_figure_trials``.
+    Requires the ``trajectory``, ``error``, ``localmin``, and ``lmax_idx``
+    fields added by ``prepare_figure_trials``.
 
     Parameters
     ----------
@@ -1189,15 +1479,15 @@ def plot_trajectories(
 
 
 def plot_velocity_profiles(
-    trials: List[Trial],
+    trials: Sequence[Trial],
     color_by: str = 'error',
     show_extrema: bool = False,
     max_trials_per_panel: int = 20
 ) -> plt.Figure:
     """Plot figure-prepared velocity time series.
 
-    This function reads the ``velocity``, ``error``, ``localmin``, and
-    ``lmax_idx`` fields added by ``prepare_figure_trials``.
+    Requires the ``velocity``, ``error``, ``localmin``, and ``lmax_idx``
+    fields added by ``prepare_figure_trials``.
 
     Parameters
     ----------
