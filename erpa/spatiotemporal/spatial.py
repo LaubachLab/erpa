@@ -1,5 +1,4 @@
-"""
-Geometric and kinematic measures for ERPA trials.
+"""Geometric and kinematic measures for ERPA trials.
 
 This module computes scalar and curve-based measures from the decision movement,
 defined as the segment from center exit to choice entry. The functions use a
@@ -8,11 +7,12 @@ Distances are reported in centimeters when a pixel-to-centimeter scale is
 available.
 """
 
-import numpy as np
-import pandas as pd
 import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Literal, Mapping, Optional, Sequence, Tuple
+
+import numpy as np
+import pandas as pd
 from numpy.typing import ArrayLike
 from scipy.ndimage import gaussian_filter1d
 
@@ -20,12 +20,13 @@ from erpa.util import as_meta_frame
 
 
 Trial = Dict[str, Any]
+ScalarMeasures = Dict[str, Any]
 Ports = Mapping[str, ArrayLike]
+DeviationDirection = Literal["chosen", "unchosen"]
 
 
 def decision_axis(ports: Ports) -> Tuple[np.ndarray, np.ndarray, float, float]:
-    """
-    Compute the decision axis from port coordinates.
+    """Compute the decision axis from port coordinates.
 
     The decision axis is the unit vector from the left choice port to the right
     choice port. Choice ``1`` is on the positive side of this axis and choice
@@ -39,9 +40,9 @@ def decision_axis(ports: Ports) -> Tuple[np.ndarray, np.ndarray, float, float]:
 
     Returns
     -------
-    center : numpy.ndarray
+    center : np.ndarray
         Center-port coordinate with shape ``(2,)``.
-    u : numpy.ndarray
+    u : np.ndarray
         Unit vector pointing from the left choice port to the right choice port,
         with shape ``(2,)``.
     dR : float
@@ -107,14 +108,14 @@ def _smooth_xy(xy: np.ndarray, sigma: float = 1.5) -> np.ndarray:
 
     Parameters
     ----------
-    xy : numpy.ndarray
+    xy : np.ndarray
         Position array with shape ``(n_frames, 2)``.
     sigma : float, optional
         Standard deviation of the Gaussian kernel, in frames.
 
     Returns
     -------
-    numpy.ndarray
+    np.ndarray
         Smoothed trajectory with shape ``(n_frames, 2)``. Trajectories with
         fewer than three frames are returned unchanged.
     """
@@ -149,9 +150,9 @@ def _segment_xy(
 
     Returns
     -------
-    numpy.ndarray or None
+    np.ndarray or None
         Position array with shape ``(n_frames, 2)`` for frames ``ce`` through
-        ``ch`` inclusive. Returns ``None`` when ``node`` is not available.
+        ``ch`` inclusive, or ``None`` when the node is unavailable.
     """
     if node == "centroid":
         return trial["centroid"][ce:ch + 1].astype(float)
@@ -162,17 +163,16 @@ def _segment_xy(
 
 
 def _arclen(xy: np.ndarray) -> np.ndarray:
-    """
-    Compute cumulative arc length for a two-dimensional trajectory.
+    """Compute cumulative arc length for a two-dimensional trajectory.
 
     Parameters
     ----------
-    xy : numpy.ndarray
+    xy : np.ndarray
         Position array with shape ``(n_frames, 2)``.
 
     Returns
     -------
-    numpy.ndarray
+    np.ndarray
         Cumulative path length in the same units as ``xy`` and with shape
         ``(n_frames,)``.
     """
@@ -181,22 +181,21 @@ def _arclen(xy: np.ndarray) -> np.ndarray:
 
 
 def arclength_resample(xy: ArrayLike, n_points: int = 50) -> np.ndarray:
-    """
-    Resample a two-dimensional trajectory at equal arc-length intervals.
+    """Resample a two-dimensional trajectory at equal arc-length intervals.
 
     Arc-length resampling represents path shape as a function of distance
     traveled rather than elapsed time.
 
     Parameters
     ----------
-    xy : numpy.ndarray
+    xy : np.ndarray
         Position array with shape ``(n_frames, 2)``.
     n_points : int, optional
         Number of samples in the resampled trajectory.
 
     Returns
     -------
-    numpy.ndarray
+    np.ndarray
         Resampled trajectory with shape ``(n_points, 2)``. If the original path
         length is zero, the first point is repeated.
     """
@@ -211,8 +210,7 @@ def arclength_resample(xy: ArrayLike, n_points: int = 50) -> np.ndarray:
 
 @dataclass
 class TrialGeometry:
-    """
-    Geometry and kinematic landmarks for one trial.
+    """Geometry and kinematic landmarks for one trial.
 
     Attributes
     ----------
@@ -228,13 +226,13 @@ class TrialGeometry:
         Video frame rate in frames per second.
     pix : float
         Centimeters per pixel.
-    center : numpy.ndarray
+    center : np.ndarray
         Center-port coordinate.
-    u : numpy.ndarray
+    u : np.ndarray
         Unit decision-axis vector.
-    chosen_port : numpy.ndarray
+    chosen_port : np.ndarray
         Coordinate of the chosen port.
-    unchosen_port : numpy.ndarray
+    unchosen_port : np.ndarray
         Coordinate of the unchosen port.
     d_chosen : float
         Center-to-chosen-port distance in pixels.
@@ -242,23 +240,23 @@ class TrialGeometry:
         Center-exit frame index.
     ch : int
         Choice-entry frame index.
-    xy : numpy.ndarray
+    xy : np.ndarray
         Raw decision-segment positions.
-    sm : numpy.ndarray
+    sm : np.ndarray
         Smoothed decision-segment positions.
-    arc : numpy.ndarray
+    arc : np.ndarray
         Cumulative arc length of the smoothed path.
     total : float
         Total smoothed path length in pixels.
     disp : float
         Straight-line displacement of the smoothed path in pixels.
-    p : numpy.ndarray
+    p : np.ndarray
         Signed projection of the path onto the decision axis.
     i_dev : int
         Index of maximum excursion toward the unchosen side.
     dev_pix : float
         Maximum excursion toward the unchosen side in pixels.
-    dev_point : numpy.ndarray
+    dev_point : np.ndarray
         Position at ``i_dev``.
     idx_commit : int
         First index where path progress reaches ``commit_frac`` of the
@@ -268,13 +266,13 @@ class TrialGeometry:
     commit_frac : float
         Fraction of the center-to-chosen-port distance used for the commitment
         threshold.
-    commit_point : numpy.ndarray
+    commit_point : np.ndarray
         Position at ``idx_commit``.
     i_land : int
         Index of the heading landmark.
-    head_point : numpy.ndarray
+    head_point : np.ndarray
         Position at ``i_land``.
-    head_vec : numpy.ndarray
+    head_vec : np.ndarray
         Unit heading vector at ``i_land``.
     head_to_chosen : float
         Projection of heading onto the chosen direction. Values near ``1`` point
@@ -282,11 +280,11 @@ class TrialGeometry:
         port.
     landmark_frac : float
         Fraction of path length used to select the heading landmark.
-    t : numpy.ndarray
+    t : np.ndarray
         Trial time axis.
-    lin_vel : numpy.ndarray
+    lin_vel : np.ndarray
         Linear velocity array.
-    ang_vel : numpy.ndarray
+    ang_vel : np.ndarray
         Angular velocity array.
     i_pkv : int
         Index of peak linear velocity within the decision segment.
@@ -337,7 +335,7 @@ class TrialGeometry:
     i_pka: int
     win: Tuple[int, int]
     half: int
-    scalars: Dict[str, Any]
+    scalars: ScalarMeasures
 
 
 def compute_trial_geometry(
@@ -350,13 +348,12 @@ def compute_trial_geometry(
     landmark_frac: float = 0.2,
     commit_frac: float = 0.5,
     smooth_sigma: float = 1.5,
-) -> Optional[Tuple[Dict[str, Any], TrialGeometry]]:
-    """
-    Compute scalar measures and geometry landmarks for one trial.
+) -> Optional[Tuple[ScalarMeasures, TrialGeometry]]:
+    """Compute scalar measures and geometry landmarks for one trial.
 
-    The decision segment runs from center exit through choice entry. The function
-    returns ``None`` when that segment is clipped, has fewer than four position
-    samples, contains non-finite positions, or uses an unavailable node.
+    The decision segment runs from center exit through choice entry. Returns
+    ``None`` when the segment is clipped, contains fewer than four position
+    samples, includes non-finite values, or uses an unavailable node.
 
     Parameters
     ----------
@@ -396,7 +393,8 @@ def compute_trial_geometry(
     -----
     ``dev_unchosen_cm`` is positive when the path moves toward the unchosen port.
     ``head_to_chosen`` is the heading projection onto the chosen direction at the
-    selected path-length landmark.
+    selected path-length landmark. ``t_peak_lin_vel`` is the elapsed time from
+    center exit to peak linear velocity, in seconds.
     """
     if pix is None:
         pix = cm_per_pixel(ports, port_spacing_cm)
@@ -455,6 +453,14 @@ def compute_trial_geometry(
         i_pkv = ch
         peak_lin_vel = np.nan
 
+    # Time from center exit to peak linear velocity, in seconds. Time zero is
+    # center exit, not cue onset, trial onset, or movement onset.
+    t_peak_lin_vel = (
+        float((i_pkv - ce) / fps)
+        if np.isfinite(peak_lin_vel)
+        else np.nan
+    )
+
     half = int(round(0.12 * fps))
     a0 = max(0, i_pkv - half)
     a1 = min(len(av), i_pkv + half + 1)
@@ -467,7 +473,6 @@ def compute_trial_geometry(
         i_pka = i_pkv
         peak_ang_vel, ang_peak_lag = np.nan, np.nan
 
-    # Order preserved exactly, so the measure table is unchanged.
     scalars = dict(
         idx=t["idx"], absolute_trial=int(t.get("absolute_trial", -1)),
         target=t["target"], choice=choice,
@@ -476,6 +481,7 @@ def compute_trial_geometry(
         cue=t.get("cue", np.nan), sampling=t["sampling"], rt=t["rt"],
         vel_choice=float(lv[ch]),
         peak_lin_vel=peak_lin_vel,
+        t_peak_lin_vel=t_peak_lin_vel,
         peak_ang_vel=peak_ang_vel,
         ang_peak_lag=ang_peak_lag,
         t_choice=(ch - ce) / fps,
@@ -521,8 +527,7 @@ def scalar_feature_matrix(
     commit_frac: float = 0.5,
     smooth_sigma: float = 1.5,
 ) -> pd.DataFrame:
-    """
-    Build one row of scalar features for each measurable trial.
+    """Build one row of scalar features for each measurable trial.
 
     Parameters
     ----------
@@ -557,10 +562,13 @@ def scalar_feature_matrix(
 
     Notes
     -----
-    The table includes behavioral measures such as ``sampling`` and ``RT``,
-    kinematic measures such as ``vel_choice``, ``peak_lin_vel``, and
-    ``peak_ang_vel``, and path measures such as ``dev_unchosen_cm`` and
-    ``tortuosity``. Trials with clipped or invalid decision segments are skipped.
+    The table includes behavioral measures such as ``sampling`` and ``rt``,
+    kinematic measures such as ``vel_choice``, ``peak_lin_vel``,
+    ``t_peak_lin_vel``, and ``peak_ang_vel``, and path measures such as
+    ``dev_unchosen_cm`` and ``tortuosity``. ``t_peak_lin_vel`` is the time from
+    center exit to peak linear velocity, in seconds. Time zero is center exit,
+    not cue onset, trial onset, or movement onset. Trials with clipped or
+    invalid decision segments are skipped.
     """
     if pix is None:
         pix = cm_per_pixel(ports, port_spacing_cm)
@@ -591,11 +599,10 @@ def deviation_curves(
     normalize: bool = True,
     pix: Optional[float] = None,
     port_spacing_cm: float = 4.0,
-    toward: str = "chosen",
+    toward: DeviationDirection = "chosen",
     smooth_sigma: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
-    """
-    Build decision-axis deviation curves over normalized path length.
+    """Build decision-axis deviation curves over normalized path length.
 
     Each trajectory is projected onto the decision axis and resampled at equal
     arc-length intervals. The output x-axis is fraction of path traveled, not
@@ -634,9 +641,9 @@ def deviation_curves(
 
     Returns
     -------
-    grid : numpy.ndarray
+    grid : np.ndarray
         Normalized arc-length grid with shape ``(n_points,)``.
-    Y : numpy.ndarray
+    Y : np.ndarray
         Deviation curves with shape ``(n_kept, n_points)``.
     meta : pandas.DataFrame
         Trial metadata for the kept curves.
@@ -697,8 +704,7 @@ def arclength_signal(
     node_names: Optional[Sequence[str]] = None,
     smooth_sigma: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
-    """
-    Resample a per-frame signal over normalized path length.
+    """Resample a per-frame signal over normalized path length.
 
     This represents a signal as a function of distance traveled along the
     decision path rather than as a function of time.
@@ -723,9 +729,9 @@ def arclength_signal(
 
     Returns
     -------
-    grid : numpy.ndarray
+    grid : np.ndarray
         Normalized arc-length grid with shape ``(n_points,)``.
-    Y : numpy.ndarray
+    Y : np.ndarray
         Resampled signals with shape ``(n_kept, n_points)``.
     meta : pandas.DataFrame
         Trial metadata for the kept curves.
