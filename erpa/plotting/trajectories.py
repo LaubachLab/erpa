@@ -1,7 +1,7 @@
 """Trajectory and velocity plotting functions.
 
 This module contains plotting functions for top-down trajectories, heading
-arrows, event-aligned velocity, and velocity time series. Orientation transforms
+direction, event-aligned velocity, and velocity time series. Orientation transforms
 change displayed coordinates only; analytical coordinates in trial dictionaries
 are not changed.
 """
@@ -30,8 +30,8 @@ class ViewTransform:
 
     The transform applies an integer number of 90 degree rotations about the
     arena center, followed by optional horizontal and vertical flips. The same
-    linear transform is applied to points and direction vectors, so heading
-    arrows stay aligned with transformed trajectories.
+    linear transform is applied to points and direction vectors so transformed
+    heading directions remain aligned with transformed trajectories.
 
     Parameters
     ----------
@@ -632,21 +632,16 @@ def _draw_trajectory_panel(
     trial: Trial,
     transform: ViewTransform,
     port_disp: np.ndarray,
-    show_heading: bool = True,
-    heading_every: int = 5,
-    heading_len: float = 24.0,
     port_marker: str = "s",
     port_size: float = 85.0,
     limit_arrays: Optional[Sequence[np.ndarray]] = None,
     pad_frac: float = 0.25,
 ) -> np.ndarray:
-    """Draw one centroid trajectory with heading arrows, ports, and start.
+    """Draw one centroid trajectory with ports and a start marker.
 
-    Both ``plot_trial`` and ``plot_trajectory_grid`` use this drawing
-    routine so that paths are rendered consistently. The path is
-    split at center entry into a pre-entry and a post-entry segment. Heading
-    arrows are drawn at a fixed frame interval when heading data are present.
-    The ports and the start marker are drawn on top.
+    Both ``plot_trial`` and ``plot_trajectory_grid`` use this drawing routine so
+    that paths are rendered consistently. The path is split at center entry into
+    pre-entry and post-entry segments. Port and start markers are drawn on top.
 
     The caller passes ``port_disp`` already transformed, aligned, and offset, so
     this helper does not repeat those corrections. The caller also passes
@@ -661,15 +656,9 @@ def _draw_trajectory_panel(
     trial : dict
         Trial dictionary.
     transform : ViewTransform
-        Display transform applied to the centroid and heading vectors.
+        Display transform applied to the centroid path.
     port_disp : np.ndarray
         Display-ready port coordinates, shape ``(n_ports, 2)``.
-    show_heading : bool, optional
-        If True, draw heading arrows.
-    heading_every : int, optional
-        Draw one heading arrow every ``heading_every`` frames.
-    heading_len : float, optional
-        Heading arrow length in pixels before the display transform.
     port_marker : str, optional
         Marker for ports.
     port_size : float, optional
@@ -710,22 +699,6 @@ def _draw_trajectory_panel(
         ax.plot(disp[center_idx:, 0], disp[center_idx:, 1],
                 color=post_color, linewidth=2.1, alpha=0.95,
                 solid_capstyle="round", label="after center entry")
-
-    if show_heading:
-        heading_for_arrows = _get_heading_direction(
-            trial, transform=transform, prefer_display_heading=False)
-        if heading_for_arrows is not None and len(heading_for_arrows) == n:
-            hvec = transform.apply(
-                np.column_stack((np.cos(heading_for_arrows),
-                                 np.sin(heading_for_arrows))) * heading_len)
-            idx = np.arange(0, n, max(1, int(heading_every)))
-            finite = (np.isfinite(disp[idx]).all(axis=1)
-                      & np.isfinite(hvec[idx]).all(axis=1))
-            idx = idx[finite]
-            ax.quiver(disp[idx, 0], disp[idx, 1], hvec[idx, 0], hvec[idx, 1],
-                      angles="xy", scale_units="xy", scale=1.0,
-                      width=0.0045, color=OKABE_ITO["black"],
-                      alpha=0.35, zorder=3)
 
     if len(port_disp):
         ax.scatter(port_disp[:, 0], port_disp[:, 1], s=port_size,
@@ -798,10 +771,9 @@ def plot_trial(
 ) -> plt.Figure:
     """Plot one trial with trajectory, heading direction, and velocity panels.
 
-    The left panel shows the centroid path in display coordinates. The path is
-    split into samples before and after center entry. Heading arrows are drawn
-    at regular frame intervals when heading data are present. The right panels
-    show heading direction, linear velocity, and angular velocity over time.
+    The left panel shows the centroid path in display coordinates, split into
+    samples before and after center entry. The right panels show heading
+    direction, linear velocity, and angular velocity over time.
 
     Parameters
     ----------
@@ -813,15 +785,18 @@ def plot_trial(
     transform : ViewTransform or None, optional
         Display transform. If None, ``PORTS_TOP`` is used.
     heading_every : int, optional
-        Draw one heading arrow every ``heading_every`` frames.
+        Deprecated and ignored. Retained for backward compatibility with calls
+        made before heading arrows were removed.
     heading_len : float, optional
-        Heading arrow length in pixels before the display transform is applied.
+        Deprecated and ignored. Retained for backward compatibility with calls
+        made before heading arrows were removed.
     figsize : tuple of float, optional
         Figure size in inches.
     dpi : int, optional
         Figure resolution.
     show_heading : bool, optional
-        If True, draw heading arrows on the trajectory panel.
+        Deprecated and ignored. Heading arrows are no longer drawn; the heading
+        direction time-series panel remains available.
     mark_events : sequence of str, optional
         Events marked on the trajectory panel. The time-series panels always
         show center exit and choice entry as vertical lines.
@@ -852,6 +827,10 @@ def plot_trial(
     """
     if transform is None:
         transform = PORTS_TOP
+
+    # Retained as no-op arguments so existing notebooks do not break in this
+    # non-breaking plotting release.
+    _ = heading_every, heading_len, show_heading
 
     pre_color = OKABE_ITO["sky_blue"]
     post_color = OKABE_ITO["blue"]
@@ -894,8 +873,7 @@ def plot_trial(
 
     disp = _draw_trajectory_panel(
         ax_traj, trial, transform, port_disp,
-        show_heading=show_heading, heading_every=heading_every,
-        heading_len=heading_len, port_marker=port_marker, port_size=port_size,
+        port_marker=port_marker, port_size=port_size,
         pad_frac=0.25,
     )
 
@@ -1095,9 +1073,8 @@ def plot_trajectory_grid(
 ) -> plt.Figure:
     """Plot multiple trajectories as small panels.
 
-    Each panel uses the trajectory drawing from ``plot_trial``. Paths are
-    split at center entry, and heading arrows use the same rendering settings.
-    Axis labels are omitted to keep the panels compact.
+    Each panel uses the trajectory drawing from ``plot_trial``. Paths are split
+    at center entry, and axis labels are omitted to keep the panels compact.
     The ports and the trajectories are centered on the shared port geometry, so
     every panel uses one common frame rather than cropping to its own path.
 
@@ -1109,16 +1086,18 @@ def plot_trajectory_grid(
         Port locations in arena coordinates. Arrays must have shape
         ``(n_ports, 2)``. Dictionaries map port labels to ``(x, y)`` positions.
     transform : ViewTransform, optional
-        Display transform applied to trajectories, heading vectors, and ports.
+        Display transform applied to trajectories and ports.
     n_cols : int, optional
         Number of panels per row.
     trial_indices : sequence of int or None, optional
         Behavioral trial ``idx`` values to plot. If ``None``, all trials are
         plotted.
     heading_every : int, optional
-        Draw one heading arrow every ``heading_every`` frames.
+        Deprecated and ignored. Retained for backward compatibility with calls
+        made before heading arrows were removed.
     heading_len : float, optional
-        Heading arrow length in pixels before the display transform is applied.
+        Deprecated and ignored. Retained for backward compatibility with calls
+        made before heading arrows were removed.
     align_ports : bool, optional
         If True, force the response ports collinear and equally spaced for
         display. Display only. Defaults to True.
@@ -1135,6 +1114,10 @@ def plot_trajectory_grid(
     matplotlib.figure.Figure
         Figure containing the trajectory grid.
     """
+    # Retained as no-op arguments so existing notebooks do not break in this
+    # non-breaking plotting release.
+    _ = heading_every, heading_len
+
     trials = _select_trials(trials, trial_indices)
     n = len(trials)
     n_rows = int(np.ceil(n / n_cols))
@@ -1158,8 +1141,7 @@ def plot_trajectory_grid(
     for ax, trial in zip(axes, trials):
         _draw_trajectory_panel(
             ax, trial, transform, port_disp,
-            show_heading=True, heading_every=heading_every,
-            heading_len=heading_len, port_marker="s", port_size=70.0,
+            port_marker="s", port_size=70.0,
             limit_arrays=limit_arrays, pad_frac=0.08)
         ax.set_aspect("equal")
         ax.set_xticks([]); ax.set_yticks([])
